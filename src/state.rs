@@ -33,6 +33,10 @@ impl State {
         Ok(())
     }
 
+    pub fn save_sessions(&self) -> Result<()> {
+        write_json("dpsessions.json", &self.sessions)
+    }
+
     pub fn block(&mut self, raw: &str, enabled: bool) -> Result<()> {
         let ip = normalize_ip(raw)?;
         if enabled { self.blacklist.insert(ip); } else { self.blacklist.remove(&ip); }
