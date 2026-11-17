@@ -16,12 +16,12 @@ known-good Node.js v2 version while this branch is developed.
 | User-Agent validation | ✅ Initial port | Rejects missing/short User-Agent values |
 | AI crawler blocking | ✅ Initial port | Configurable token-based filter |
 | Maintenance mode | ✅ Initial port | Global and per-vhost maintenance response |
-| dpSession IDs | ✅ Initial port | Fingerprint + UUID, persisted in `dpsessions.json` |
-| dpSession ban API | ✅ Initial port | Optional authenticated query endpoint supports ban/unban by session UUID; integration tests still required |
+| dpSession IDs | ✅ Initial port | Fingerprint + UUID, persisted in `dpsessions.json`; TUI shows sessions and session history |
+| dpSession ban API | ✅ Initial port | Optional authenticated query endpoint and TUI/CLI actions support ban/unban by session UUID; integration tests still required |
 | Daily access logs | ✅ Initial port | `logs/access-YYYY-MM-DD.log` |
 | Static error pages | ✅ Initial port | Existing `staticPages/*.html` preserved |
 | Runtime logs | ✅ Initial port | Daily rotating tracing output |
-| Cloudflare DNS records | 🟡 Partial | Creates proxied A records and deletes only records tagged as dasiiProxy-managed; update/rollback and full lifecycle handling pending |
+| Cloudflare DNS records | 🟡 Partial | TUI/CLI create proxied A records and delete only records tagged as dasiiProxy-managed; update/rollback and full lifecycle handling pending |
 | Discord alerts | ✅ Initial port | Upstream and WebSocket failures trigger a per-domain webhook alert with a five-minute cooldown |
 | Public IP auto-detection | ✅ Initial port | Looks up the public IP during startup and stores it in config; network failure is non-fatal |
 | Dashboard login/password | 🔁 Replaced | No network dashboard; local TUI is the control surface |
