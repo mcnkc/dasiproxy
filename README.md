@@ -59,6 +59,9 @@ do not trust arbitrary `X-Forwarded-For` values.
 
 ## Data compatibility
 
+Import old v2 JSON files from an existing v2 directory with `dasiproxy import-legacy /path/to/old-dasiproxy`.
+Existing target files are backed up as `*.pre-rust.bak` before import.
+
 The Rust version reads/writes the existing file names where appropriate:
 `config.json`, `vhosts.json`, `blacklist.json`, `priority_sites.json`,
 `visit_stats.json`, and `dpsessions.json`. Legacy camelCase config keys are
