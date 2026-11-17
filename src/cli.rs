@@ -18,6 +18,12 @@ pub enum Command {
     Config { #[arg(long)] show: bool },
     /// List configured virtual hosts
     Vhosts,
+    /// List tracked dpSessions
+    Sessions,
+    /// Display traffic counters and priority hosts
+    Traffic,
+    /// Show today's access log entries
+    Logs { #[arg(long, default_value_t = 80)] lines: usize },
     /// Add an IP address to the blacklist
     Ban { ip: String },
     /// Remove an IP address from the blacklist
@@ -26,7 +32,7 @@ pub enum Command {
     WhitelistAdd { ip: String },
     /// Remove an IP address from the whitelist
     WhitelistRemove { ip: String },
-    /// Enable or disable maintenance mode (example: maintenance --enabled true)
+    /// Enable or disable maintenance mode
     Maintenance { #[arg(long, action = clap::ArgAction::Set)] enabled: bool },
     /// Import legacy dasiiProxy JSON files from a directory
     ImportLegacy { #[arg(default_value = ".")] path: PathBuf },
