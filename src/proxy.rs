@@ -373,6 +373,6 @@ mod tests {
 
     #[test]
     fn finds_end_of_http_headers() {
-        assert_eq!(find_header_end(b"HTTP/1.1 101 Switching Protocols\\r\\n\\r\\nframe"), Some(34));
+        assert_eq!(find_header_end(b"HTTP/1.1 101 Switching Protocols\\r\\n\\r\\nframe"), Some(32));
     }
 }
