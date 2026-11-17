@@ -9,7 +9,12 @@ use hyper_util::{
     server::conn::auto,
 };
 use std::{collections::HashMap, convert::Infallible, net::{IpAddr, SocketAddr}, sync::Arc, time::Instant};
-use tokio::{fs::{self, OpenOptions}, io::AsyncWriteExt, net::TcpListener, time::{interval, Duration}};
+use tokio::{
+    fs::{self, OpenOptions},
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    time::{interval, Duration},
+};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -175,16 +180,121 @@ async fn handle(
     req.headers_mut().insert("x-proxy-session-id", session_id.parse().unwrap_or_else(|_| header::HeaderValue::from_static("")));
     req.headers_mut().insert("x-forwarded-proto", header::HeaderValue::from_static("http"));
 
+    if is_websocket_upgrade(&req) {
+        return match websocket_proxy(req, &target).await {
+            Ok(response) => Ok(response),
+            Err(err) => {
+                error!(domain = %host, error = %err, "websocket upstream failed");
+                Ok(error_response(StatusCode::BAD_GATEWAY, 502, "WebSocket Bad Gateway", cfg.prefer_default_static_pages))
+            }
+        };
+    }
+
     match client.request(req).await {
         Ok(response) => {
-            let (parts, body) = response.into_parts();
-            Ok(Response::from_parts(parts, body.map_err(|err| err).boxed()))
+            let (mut parts, body) = response.into_parts();
+            for (name, value) in [
+                (header::HeaderName::from_static("x-frame-options"), header::HeaderValue::from_static("DENY")),
+                (header::HeaderName::from_static("x-content-type-options"), header::HeaderValue::from_static("nosniff")),
+                (header::HeaderName::from_static("referrer-policy"), header::HeaderValue::from_static("no-referrer")),
+                (header::HeaderName::from_static("permissions-policy"), header::HeaderValue::from_static("geolocation=(), camera=()")),
+            ] {
+                parts.headers.insert(name, value);
+            }
+            let status_code = parts.status.as_u16();
+            if cfg.prefer_default_static_pages && matches!(status_code, 400 | 401 | 403 | 404 | 429 | 500 | 502 | 503 | 504 | 505) {
+                return Ok(error_response(parts.status, status_code, "Upstream error", true));
+            }
+            Ok(Response::from_parts(parts, body.boxed()))
         }
         Err(err) => {
             error!(domain = %host, error = %err, "upstream request failed");
             Ok(error_response(StatusCode::BAD_GATEWAY, 502, "Bad Gateway", cfg.prefer_default_static_pages))
         }
     }
+}
+
+
+
+fn is_websocket_upgrade(req: &Request<Incoming>) -> bool {
+    let upgrade = req.headers().get(header::UPGRADE).and_then(|v| v.to_str().ok()).unwrap_or("");
+    let connection = req.headers().get(header::CONNECTION).and_then(|v| v.to_str().ok()).unwrap_or("");
+    upgrade.eq_ignore_ascii_case("websocket")
+        && connection.split(',').any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+}
+
+async fn websocket_proxy(mut req: Request<Incoming>, target: &str) -> Result<Response<ProxyBody>> {
+    let on_upgrade = hyper::upgrade::on(&mut req);
+    let port = target.parse::<u16>().context("invalid WebSocket upstream port")?;
+    let mut upstream = TcpStream::connect(("127.0.0.1", port)).await
+        .context("could not connect to WebSocket upstream")?;
+
+    let path = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let mut head = format!("{} {} HTTP/1.1\\r\\n", req.method(), path);
+    for (name, value) in req.headers() {
+        let value = value.to_str().context("invalid request header encoding")?;
+        head.push_str(name.as_str());
+        head.push_str(": ");
+        head.push_str(value);
+        head.push_str("\\r\\n");
+    }
+    head.push_str("\\r\\n");
+    upstream.write_all(head.as_bytes()).await.context("could not forward WebSocket handshake")?;
+
+    let mut response_bytes = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 2048];
+    let header_end = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let n = upstream.read(&mut chunk).await?;
+            if n == 0 { anyhow::bail!("upstream closed before WebSocket handshake completed"); }
+            response_bytes.extend_from_slice(&chunk[..n]);
+            if response_bytes.len() > 65_536 { anyhow::bail!("upstream WebSocket headers exceed 64 KiB"); }
+            if let Some(pos) = find_header_end(&response_bytes) { break Ok::<usize, anyhow::Error>(pos + 4); }
+        }
+    }).await.context("WebSocket handshake timed out")??;
+
+    let header_text = std::str::from_utf8(&response_bytes[..header_end])
+        .context("upstream returned non-UTF8 WebSocket headers")?;
+    let mut lines = header_text.split("\\r\\n");
+    let status_line = lines.next().context("missing WebSocket status line")?;
+    let status_number = status_line.split_whitespace().nth(1)
+        .context("invalid WebSocket status line")?.parse::<u16>()?;
+    let status = StatusCode::from_u16(status_number)?;
+    if status != StatusCode::SWITCHING_PROTOCOLS {
+        anyhow::bail!("upstream rejected WebSocket upgrade with status {status}");
+    }
+
+    let mut builder = Response::builder().status(status);
+    for line in lines {
+        if line.is_empty() { continue; }
+        if let Some((name, value)) = line.split_once(':') {
+            let name = header::HeaderName::from_bytes(name.trim().as_bytes())?;
+            let value = header::HeaderValue::from_bytes(value.trim().as_bytes())?;
+            builder = builder.header(name, value);
+        }
+    }
+    let response = builder.body(full(Bytes::new()))?;
+    let leftover = response_bytes[header_end..].to_vec();
+
+    tokio::spawn(async move {
+        match on_upgrade.await {
+            Ok(upgraded) => {
+                let mut downstream = TokioIo::new(upgraded);
+                if !leftover.is_empty() {
+                    if downstream.write_all(&leftover).await.is_err() { return; }
+                }
+                if let Err(err) = tokio::io::copy_bidirectional(&mut downstream, &mut upstream).await {
+                    warn!(error = %err, "WebSocket tunnel closed with an error");
+                }
+            }
+            Err(err) => warn!(error = %err, "client WebSocket upgrade failed"),
+        }
+    });
+    Ok(response)
+}
+
+fn find_header_end(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(4).position(|window| window == b"\\r\\n\\r\\n")
 }
 
 fn client_ip(req: &Request<Incoming>, peer: SocketAddr) -> String {
