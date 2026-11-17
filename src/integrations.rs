@@ -127,3 +127,62 @@ pub async fn notify_proxy_error(cfg: &Config, domain: &str, error: &str) -> Resu
         .context("Discord webhook rejected the alert")?;
     Ok(())
 }
+
+
+/// Deletes only an A record that was created by dasiiProxy (v2 or v3).
+/// Unrelated/manual DNS records are deliberately left untouched.
+pub async fn delete_cloudflare_record(cfg: &Config, domain: &str) -> Result<bool> {
+    if !cfg.enable_cloudflare {
+        return Ok(false);
+    }
+    if cfg.cf_api_token.trim().is_empty() || cfg.cf_zone_id.trim().is_empty() {
+        anyhow::bail!("Cloudflare is enabled but API token or zone ID is missing");
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    let endpoint = format!(
+        "https://api.cloudflare.com/client/v4/zones/{}/dns_records",
+        cfg.cf_zone_id
+    );
+    let response = client.get(&endpoint)
+        .bearer_auth(&cfg.cf_api_token)
+        .query(&[("type", "A"), ("name", domain)])
+        .send()
+        .await
+        .context("Cloudflare DNS lookup failed")?
+        .error_for_status()
+        .context("Cloudflare rejected DNS lookup")?;
+    let body: serde_json::Value = response.json().await
+        .context("Cloudflare returned an invalid DNS response")?;
+
+    let records = body.get("result").and_then(|value| value.as_array())
+        .context("Cloudflare DNS response is missing result array")?;
+    let record_id = records.iter().find_map(|record| {
+        let comment = record.get("comment").and_then(|value| value.as_str()).unwrap_or("");
+        let name = record.get("name").and_then(|value| value.as_str()).unwrap_or("");
+        if name.eq_ignore_ascii_case(domain)
+            && (comment.starts_with("Added via dasiiProxy") || comment.starts_with("Added via dasiiproxy")) {
+            record.get("id").and_then(|value| value.as_str()).map(str::to_owned)
+        } else {
+            None
+        }
+    });
+
+    let Some(record_id) = record_id else { return Ok(false); };
+    let delete_url = format!("{endpoint}/{record_id}");
+    let response = client.delete(delete_url)
+        .bearer_auth(&cfg.cf_api_token)
+        .send()
+        .await
+        .context("Cloudflare DNS delete request failed")?
+        .error_for_status()
+        .context("Cloudflare rejected DNS record deletion")?;
+    let result: serde_json::Value = response.json().await
+        .context("Cloudflare returned an invalid delete response")?;
+    if result.get("success").and_then(|value| value.as_bool()) != Some(true) {
+        anyhow::bail!("Cloudflare failed to delete the matching dasiiProxy DNS record");
+    }
+    Ok(true)
+}
