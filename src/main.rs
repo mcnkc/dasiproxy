@@ -30,7 +30,9 @@ async fn main() -> Result<()> {
         Command::Vhosts => app::list_vhosts(),
         Command::Sessions => app::list_sessions(),
         Command::Traffic => app::show_traffic(),
-        Command::Logs { lines } => app::show_access_logs(lines),
+        Command::Logs { lines, system } => {
+            if system { app::show_runtime_logs(lines) } else { app::show_access_logs(lines) }
+        },
         Command::Ban { ip } => app::set_ip_block(&ip, true),
         Command::Unban { ip } => app::set_ip_block(&ip, false),
         Command::WhitelistAdd { ip } => app::set_whitelist(&ip, true),
