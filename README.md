@@ -8,12 +8,12 @@ The web dashboard and management HTTP API are replaced by a local terminal inter
 
 ## Architecture
 
-- Tokio async runtime
-- Hyper HTTP reverse proxy
+- Tokio async runtime and Hyper HTTP reverse proxy
+- HTTP/1.1 WebSocket Upgrade tunnel
 - Ratatui + Crossterm terminal dashboard
 - Clap command-line administration
 - Serde JSON configuration and legacy data files
-- Tracing-based runtime logs
+- Tracing-based rotating runtime logs
 
 ## Build
 
@@ -29,6 +29,8 @@ cargo run -- serve
 cargo run -- vhosts
 cargo run -- ban 203.0.113.10
 cargo run -- unban 203.0.113.10
+cargo run -- whitelist-add 203.0.113.10
+cargo run -- whitelist-remove 203.0.113.10
 cargo run -- maintenance --enabled true
 cargo run -- config --show
 ```
@@ -46,11 +48,11 @@ supported.
 
 ## Rewrite status
 
-The initial Rust application includes the CLI, terminal menu, JSON state handling,
-IP allow/deny lists, maintenance mode, per-IP rate limiting, session identifiers,
-daily access logs, and an HTTP reverse-proxy foundation.
+The initial Rust version includes the TUI/CLI, HTTP and WebSocket proxying, vhost
+routing, error pages, IP allow/deny lists, maintenance mode, request-method and
+AI-crawler filters, per-IP rate limiting with automatic bans, session identifiers,
+daily access logs, hot state reload, and traffic-threshold priority bypass.
 
-Full production parity is not yet complete. WebSocket tunnelling, TLS termination
-(if needed outside Cloudflare), Cloudflare DNS automation, Discord alerts, advanced
-traffic prioritisation, AI-bot filtering, and all legacy edge-case behaviours still
-need to be ported and tested before replacing a production v2 instance.
+Remaining parity work is tracked in [PORTING.md](PORTING.md). Do not replace a
+production v2 instance until the remaining integrations are implemented and the
+Rust proxy is tested against the actual deployment topology.
