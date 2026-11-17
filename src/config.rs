@@ -176,6 +176,7 @@ pub fn set_value(key: &str, value: &str) -> Result<()> {
         "rateLimit.window" => cfg.rate_limit.window = value.parse().context("rateLimit.window sayı olmalı")?,
         "priorityEvaluateIntervalDays" => cfg.priority_evaluate_interval_days = value.parse().context("priorityEvaluateIntervalDays sayı olmalı")?,
         "priorityTopCount" => cfg.priority_top_count = value.parse().context("priorityTopCount sayı olmalı")?,
+        "highTrafficThresholdRequestsPerWindow" => cfg.high_traffic_threshold_requests_per_window = value.parse().context("highTrafficThresholdRequestsPerWindow sayı olmalı")?,
         _ => anyhow::bail!("Bilinmeyen ayar: {key}"),
     }
 
