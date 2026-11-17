@@ -21,7 +21,7 @@ use std::{
 };
 use tokio::task::JoinHandle;
 
-const ITEMS: [&str; 31] = [
+const ITEMS: [&str; 32] = [
     "Overview",
     "Virtual Hosts",
     "Blacklist",
@@ -52,6 +52,7 @@ const ITEMS: [&str; 31] = [
     "Add IP to Whitelist",
     "Remove IP from Whitelist",
     "Toggle Hot Domain Detection",
+    "Toggle Cloudflare Edge Requirement",
     "Quit",
 ];
 
@@ -359,7 +360,14 @@ async fn draw_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Res
                             notice = format!("Hot domain detection {}", on_off(cfg.hot_domain_detect));
                             detail = panel_detail(9)?;
                         }
-                        30 => break,
+                        30 => {
+                            let mut cfg = crate::config::load()?;
+                            cfg.require_cloudflare = !cfg.require_cloudflare;
+                            crate::config::save(&cfg)?;
+                            notice = format!("Cloudflare edge requirement {}", on_off(cfg.require_cloudflare));
+                            detail = panel_detail(9)?;
+                        }
+                        31 => break,
                         _ => {}
                     },
                     _ => {}
@@ -379,14 +387,14 @@ fn panel_detail(selected: usize) -> Result<String> {
     let metrics = crate::metrics::snapshot();
     let detail = match selected {
         0 => format!(
-            "dasiiProxy v3\n\nVirtual hosts: {}\nBlacklist entries: {}\nWhitelist entries: {}\nTracked sessions: {}\nTracked hosts: {}\nPriority hosts: {}\n\nListener: {}:{}\nMaintenance: {}\nAI bot blocking: {}\nAccess logs: {}\nStatic error pages: {}\nPriority routing: {}\ndpSession API: {}\nCloudflare DNS: {}\nHot domain detection: {}",
+            "dasiiProxy v3\n\nVirtual hosts: {}\nBlacklist entries: {}\nWhitelist entries: {}\nTracked sessions: {}\nTracked hosts: {}\nPriority hosts: {}\n\nListener: {}:{}\nMaintenance: {}\nAI bot blocking: {}\nAccess logs: {}\nStatic error pages: {}\nPriority routing: {}\ndpSession API: {}\nCloudflare DNS: {}\nHot domain detection: {}\nCloudflare edge required: {}",
             state.vhosts.len(), state.blacklist.len(), state.whitelist.len(),
             state.sessions.len(), state.visit_stats.len(), state.priority_sites.len(),
             cfg.listen_address, cfg.listen_port,
             on_off(cfg.maintenance_mode), on_off(cfg.block_ai_bots), on_off(cfg.enable_access_logs),
             on_off(cfg.prefer_default_static_pages), on_off(cfg.enable_priority_by_traffic),
             on_off(cfg.enable_dp_session_api), on_off(cfg.enable_cloudflare),
-            on_off(cfg.hot_domain_detect)
+            on_off(cfg.hot_domain_detect), on_off(cfg.require_cloudflare)
         ),
         1 => {
             let mut items: Vec<_> = state.vhosts.iter().collect();
