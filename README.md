@@ -28,7 +28,11 @@ cargo run -- tui
 cargo run -- serve
 cargo run -- status
 cargo run -- vhosts
-cargo run -- sessions
+cargo run -- vhost-add example.com 3000
+cargo run -- vhost-remove example.com
+cargo run -- sessions --search 203.0.113.10 --page 1
+cargo run -- session-ban SESSION_UUID
+cargo run -- session-unban SESSION_UUID
 cargo run -- traffic
 cargo run -- logs --lines 80
 cargo run -- logs --system --lines 80
