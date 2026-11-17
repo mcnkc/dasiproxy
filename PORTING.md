@@ -12,12 +12,12 @@ known-good Node.js v2 version while this branch is developed.
 | Blacklist / whitelist | ✅ Initial port | IP validation and persisted lists |
 | Rate limiting | ✅ Initial port | Per-IP rolling window |
 | Automatic IP ban | ✅ Initial port | Triggered after 5× configured request limit |
-| Priority traffic bypass | 🟡 Partial | Uses configured `priority_sites.json` when traffic threshold is reached; periodic automatic ranking/evaluation still pending |
+| Priority traffic bypass | ✅ Initial port | Tracks per-host requests and periodically rebuilds `priority_sites.json` using the configured interval and top-host count |
 | User-Agent validation | ✅ Initial port | Rejects missing/short User-Agent values |
 | AI crawler blocking | ✅ Initial port | Configurable token-based filter |
 | Maintenance mode | ✅ Initial port | Global and per-vhost maintenance response |
 | dpSession IDs | ✅ Initial port | Fingerprint + UUID, persisted in `dpsessions.json` |
-| dpSession ban API | ✅ Initial port | Optional authenticated query endpoint supports ban/unban by session UUID; auth and integration tests still required |
+| dpSession ban API | ✅ Initial port | Optional authenticated query endpoint supports ban/unban by session UUID; integration tests still required |
 | Daily access logs | ✅ Initial port | `logs/access-YYYY-MM-DD.log` |
 | Static error pages | ✅ Initial port | Existing `staticPages/*.html` preserved |
 | Runtime logs | ✅ Initial port | Daily rotating tracing output |
@@ -32,7 +32,7 @@ known-good Node.js v2 version while this branch is developed.
 ## Test gates before production
 
 - Build and unit tests on Linux and Windows
-- HTTP method, body streaming, headers, redirects, and error-page tests
+- HTTP method, body streaming, headers, redirects, and error-page tests\n- Priority evaluation timing and ranking tests
 - WebSocket handshake and long-lived bidirectional traffic test
 - Rate-limit / auto-ban / allowlist integration tests
 - Cloudflare DNS, Discord webhook, and dpSession API integration tests
