@@ -26,8 +26,8 @@ pub enum Command {
     WhitelistAdd { ip: String },
     /// Remove an IP address from the whitelist
     WhitelistRemove { ip: String },
-    /// Enable or disable maintenance mode
-    Maintenance { enabled: bool },
+    /// Enable or disable maintenance mode (example: maintenance --enabled true)
+    Maintenance { #[arg(long, action = clap::ArgAction::Set)] enabled: bool },
     /// Import legacy dasiiProxy JSON files from a directory
     ImportLegacy { #[arg(default_value = ".")] path: PathBuf },
 }
