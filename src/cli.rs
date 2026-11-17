@@ -27,7 +27,13 @@ pub enum Command {
     /// Display traffic counters and priority hosts
     Traffic,
     /// Show today's access log entries
-    Logs { #[arg(long, default_value_t = 80)] lines: usize },
+    Logs {
+        #[arg(long, default_value_t = 80)]
+        lines: usize,
+        /// Read rotating runtime/system logs instead of access logs
+        #[arg(long)]
+        system: bool,
+    },
     /// Add an IP address to the blacklist
     Ban { ip: String },
     /// Remove an IP address from the blacklist
