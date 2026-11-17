@@ -27,6 +27,9 @@ cargo build --release
 cargo run -- tui
 cargo run -- serve
 cargo run -- vhosts
+cargo run -- sessions
+cargo run -- traffic
+cargo run -- logs --lines 80
 cargo run -- ban 203.0.113.10
 cargo run -- unban 203.0.113.10
 cargo run -- whitelist-add 203.0.113.10
@@ -51,7 +54,9 @@ supported.
 The initial Rust version includes the TUI/CLI, HTTP and WebSocket proxying, vhost
 routing, error pages, IP allow/deny lists, maintenance mode, request-method and
 AI-crawler filters, per-IP rate limiting with automatic bans, session identifiers,
-daily access logs, hot state reload, and traffic-threshold priority bypass.
+daily access logs, hot state reload, traffic counters and periodic priority-host
+evaluation. TUI panels cover overview, vhosts, IP lists, sessions, traffic,
+access logs and configuration.
 
 Remaining parity work is tracked in [PORTING.md](PORTING.md). Do not replace a
 production v2 instance until the remaining integrations are implemented and the
