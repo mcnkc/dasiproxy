@@ -20,6 +20,8 @@ pub enum Command {
     ConfigSet { key: String, value: String },
     /// List configured virtual hosts
     Vhosts,
+    /// Show runtime status and counters
+    Status,
     /// List tracked dpSessions
     Sessions,
     /// Display traffic counters and priority hosts
