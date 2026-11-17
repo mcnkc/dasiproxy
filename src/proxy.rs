@@ -16,7 +16,6 @@ use tokio::{
     time::{interval, Duration},
 };
 use tracing::{error, info, warn};
-use uuid::Uuid;
 
 use crate::{config, state::{State, normalize_ip}};
 
@@ -38,15 +37,18 @@ pub async fn serve() -> Result<()> {
         }
     }
     let state = Arc::new(tokio::sync::RwLock::new(State::load()?));
+    let config_cache = Arc::new(tokio::sync::RwLock::new(cfg.clone()));
     let rate_state = Arc::new(tokio::sync::Mutex::new(HashMap::<String, (Instant, u64)>::new()));
     let traffic_window = Arc::new(tokio::sync::Mutex::new((Instant::now(), 0u64)));
 
-    // Re-read JSON data only while hot domain detection is enabled.
-    // Traffic counters are flushed independently so disabling hot reload does not lose metrics.
+    // Config is refreshed once per second, not from the request hot path. Only
+    // externally editable routing/security files are reloaded; session history stays in memory.
     let state_refresh = state.clone();
+    let config_refresh = config_cache.clone();
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(1));
         let mut last_visit_persist = Instant::now();
+        let mut last_session_persist = Instant::now();
         let now = Utc::now().timestamp();
         let mut last_priority_evaluation = fs::read_to_string("priority_last_evaluated.txt")
             .await.ok().and_then(|value| value.trim().parse::<i64>().ok())
@@ -57,39 +59,64 @@ pub async fn serve() -> Result<()> {
 
         loop {
             ticker.tick().await;
-            let current_config = config::load().unwrap_or_default();
+            let current_config = match config::load() {
+                Ok(fresh) => {
+                    *config_refresh.write().await = fresh.clone();
+                    fresh
+                }
+                Err(err) => {
+                    warn!(error = %err, "config reload failed; retaining last valid configuration");
+                    config_refresh.read().await.clone()
+                }
+            };
 
             if current_config.hot_domain_detect {
-                match State::load() {
-                    Ok(mut fresh) => {
+                match tokio::task::spawn_blocking(State::load_hot_reload).await {
+                    Ok(Ok(fresh)) => {
                         let mut current = state_refresh.write().await;
-                        fresh.visit_stats = current.visit_stats.clone();
-                        *current = fresh;
+                        current.vhosts = fresh.vhosts;
+                        current.blacklist = fresh.blacklist;
+                        current.priority_sites = fresh.priority_sites;
+                        current.whitelist = current_config.ip_whitelist.iter().cloned().collect();
                     }
-                    Err(err) => warn!(error = %err, "state refresh failed; keeping previous state"),
+                    Ok(Err(err)) => warn!(error = %err, "hot reload failed; retaining current state"),
+                    Err(err) => warn!(error = %err, "hot reload worker failed"),
                 }
             }
 
-            let mut current = state_refresh.write().await;
-            if last_visit_persist.elapsed() >= Duration::from_secs(15) {
-                if let Err(err) = current.save_visit_stats() {
-                    warn!(error = %err, "traffic counters could not be persisted");
+            {
+                let mut current = state_refresh.write().await;
+                if last_visit_persist.elapsed() >= Duration::from_secs(15) {
+                    if let Err(err) = current.save_visit_stats() {
+                        warn!(error = %err, "traffic counters could not be persisted");
+                    }
+                    last_visit_persist = Instant::now();
                 }
-                last_visit_persist = Instant::now();
-            }
 
-            let now = Utc::now().timestamp();
-            let interval_seconds = current_config.priority_evaluate_interval_days.max(1) as i64 * 86_400;
-            if now - last_priority_evaluation >= interval_seconds {
-                match current.evaluate_priorities(current_config.priority_top_count) {
-                    Ok(()) => {
-                        last_priority_evaluation = now;
-                        if let Err(err) = fs::write("priority_last_evaluated.txt", now.to_string()).await {
-                            warn!(error = %err, "priority evaluation timestamp could not be saved");
+                let now = Utc::now().timestamp();
+                let interval_seconds = current_config.priority_evaluate_interval_days.max(1) as i64 * 86_400;
+                if now - last_priority_evaluation >= interval_seconds {
+                    match current.evaluate_priorities(current_config.priority_top_count) {
+                        Ok(()) => {
+                            last_priority_evaluation = now;
+                            if let Err(err) = fs::write("priority_last_evaluated.txt", now.to_string()).await {
+                                warn!(error = %err, "priority evaluation timestamp could not be saved");
+                            }
+                            info!("traffic priority list evaluated");
                         }
-                        info!("traffic priority list evaluated");
+                        Err(err) => warn!(error = %err, "priority evaluation failed"),
                     }
-                    Err(err) => warn!(error = %err, "priority evaluation failed"),
+                }
+            }
+
+            if last_session_persist.elapsed() >= Duration::from_secs(2) {
+                last_session_persist = Instant::now();
+                let snapshot = state_refresh.read().await.sessions_snapshot_for_persistence();
+                if let Some((revision, sessions)) = snapshot {
+                    match persist_sessions_snapshot(sessions).await {
+                        Ok(()) => state_refresh.write().await.mark_sessions_persisted(revision),
+                        Err(err) => warn!(error = %err, "batched session persistence failed; will retry"),
+                    }
                 }
             }
         }
@@ -110,6 +137,7 @@ pub async fn serve() -> Result<()> {
         let (stream, peer) = listener.accept().await?;
         let io = TokioIo::new(stream);
         let state = state.clone();
+        let config_cache = config_cache.clone();
         let rate_state = rate_state.clone();
         let traffic_window = traffic_window.clone();
         let client = client.clone();
@@ -117,10 +145,11 @@ pub async fn serve() -> Result<()> {
         tokio::spawn(async move {
             let service = hyper::service::service_fn(move |req| {
                 let state = state.clone();
+                let config_cache = config_cache.clone();
                 let rate_state = rate_state.clone();
                 let traffic_window = traffic_window.clone();
                 let client = client.clone();
-                async move { handle(req, peer, state, rate_state, traffic_window, client).await }
+                async move { handle(req, peer, state, config_cache, rate_state, traffic_window, client).await }
             });
             if let Err(err) = auto::Builder::new(TokioExecutor::new())
                 .serve_connection_with_upgrades(io, service)
@@ -136,6 +165,7 @@ async fn handle(
     mut req: Request<Incoming>,
     peer: SocketAddr,
     state: Arc<tokio::sync::RwLock<State>>,
+    config_cache: Arc<tokio::sync::RwLock<config::Config>>,
     rate_state: Arc<tokio::sync::Mutex<HashMap<String, (Instant, u64)>>>,
     traffic_window: Arc<tokio::sync::Mutex<(Instant, u64)>>,
     client: Client<HttpConnector, Incoming>,
@@ -143,21 +173,14 @@ async fn handle(
     let _request_metrics = crate::metrics::begin_request();
     let raw_host = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     let host = normalize_host(&raw_host);
-    let cfg = match config::load() {
-        Ok(config) => config,
-        Err(err) => {
-            error!(error = %err, "cannot load configuration");
-            return Ok(error_response(StatusCode::INTERNAL_SERVER_ERROR, 500, "Configuration error", true));
-        }
-    };
-
+    let cfg = config_cache.read().await.clone();
     let ip = client_ip(&req, peer, &cfg.trusted_proxy_cidrs);
 
-    {
+    let state_snapshot = {
         let mut guard = state.write().await;
         *guard.visit_stats.entry(host.clone()).or_insert(0) += 1;
-    }
-    let state_snapshot = state.read().await.clone();
+        guard.request_snapshot(&ip, &host)
+    };
 
     if cfg.enable_dp_session_api
         && host.eq_ignore_ascii_case(&cfg.dp_session_api_domain)
@@ -185,9 +208,9 @@ async fn handle(
         return Ok(error_response(StatusCode::FORBIDDEN, 403, "Request blocked by WAF", cfg.prefer_default_static_pages));
     }
 
-    let whitelisted = state_snapshot.whitelist.contains(&ip);
+    let whitelisted = state_snapshot.whitelisted;
 
-    if state_snapshot.blacklist.contains(&ip) && !whitelisted {
+    if state_snapshot.blacklisted && !whitelisted {
         return Ok(error_response(StatusCode::FORBIDDEN, 403, "Forbidden", cfg.prefer_default_static_pages));
     }
     if cfg.maintenance_mode && !whitelisted {
@@ -258,18 +281,18 @@ async fn handle(
 
         let priority_allowed = cfg.enable_priority_by_traffic
             && high_traffic
-            && state_snapshot.priority_sites.contains(&host);
+            && state_snapshot.priority_site;
         if limited && !priority_allowed {
             warn!(client_ip = %ip, "rate limit exceeded");
             return Ok(error_response(StatusCode::TOO_MANY_REQUESTS, 429, "Too many requests", cfg.prefer_default_static_pages));
         }
     }
 
-    let target = match state_snapshot.vhosts.get(&host) {
+    let target = match state_snapshot.target {
         Some(target) if target == "maintenance" => {
             return Ok(error_response(StatusCode::SERVICE_UNAVAILABLE, 503, "Maintenance", cfg.prefer_default_static_pages));
         }
-        Some(target) => target.clone(),
+        Some(target) => target,
         None => return Ok(error_response(StatusCode::NOT_FOUND, 404, "Unknown host", cfg.prefer_default_static_pages)),
     };
     if target.parse::<u16>().is_err() {
@@ -280,21 +303,7 @@ async fn handle(
         let user_agent = header_text(req.headers(), header::USER_AGENT);
         let language = req.headers().get("accept-language").and_then(|v| v.to_str().ok()).unwrap_or("unknown");
         let fingerprint = format!("{ip}|{}|{}", truncate(&user_agent, 256), truncate(language, 128));
-        let mut guard = state.write().await;
-        match guard.sessions.get(&fingerprint) {
-            Some(existing) => existing.clone(),
-            None => {
-                if guard.sessions.len() > 50_000 {
-                    guard.sessions.clear();
-                }
-                let id = Uuid::new_v4().to_string();
-                guard.sessions.insert(fingerprint, id.clone());
-                if let Err(err) = guard.save_sessions() {
-                    warn!(error = %err, "could not persist session");
-                }
-                id
-            }
-        }
+        state.write().await.get_or_create_session(fingerprint)
     };
 
     if cfg.enable_access_logs {
@@ -376,6 +385,25 @@ async fn handle(
 
 
 
+
+async fn persist_sessions_snapshot(sessions: HashMap<String, String>) -> Result<()> {
+    let serialized = tokio::task::spawn_blocking(move || serde_json::to_vec_pretty(&sessions))
+        .await
+        .context("session serialization worker failed")??;
+    tokio::fs::write("dpsessions.json.tmp", serialized)
+        .await
+        .context("temporary session file could not be written")?;
+
+    if cfg!(windows) && tokio::fs::try_exists("dpsessions.json").await.unwrap_or(false) {
+        tokio::fs::remove_file("dpsessions.json")
+            .await
+            .context("old session file could not be replaced on Windows")?;
+    }
+    tokio::fs::rename("dpsessions.json.tmp", "dpsessions.json")
+        .await
+        .context("session file could not be committed")?;
+    Ok(())
+}
 
 async fn handle_dp_session_api(
     req: &Request<Incoming>,
