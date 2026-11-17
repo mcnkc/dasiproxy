@@ -139,8 +139,6 @@ async fn handle(
     let _request_metrics = crate::metrics::begin_request();
     let raw_host = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     let host = normalize_host(&raw_host);
-    let ip = client_ip(&req, peer);
-
     let cfg = match config::load() {
         Ok(config) => config,
         Err(err) => {
@@ -148,6 +146,8 @@ async fn handle(
             return Ok(error_response(StatusCode::INTERNAL_SERVER_ERROR, 500, "Configuration error", true));
         }
     };
+
+    let ip = client_ip(&req, peer, &cfg.trusted_proxy_cidrs);
 
     {
         let mut guard = state.write().await;
@@ -516,14 +516,27 @@ fn find_header_end(bytes: &[u8]) -> Option<usize> {
     bytes.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
-fn client_ip(req: &Request<Incoming>, peer: SocketAddr) -> String {
-    for name in ["cf-connecting-ip", "x-forwarded-for"] {
-        if let Some(value) = req.headers().get(name).and_then(|v| v.to_str().ok()) {
-            let first = value.split(',').next().unwrap_or("").trim();
-            if let Ok(ip) = first.parse::<IpAddr>() { return ip.to_string(); }
+fn client_ip(req: &Request<Incoming>, peer: SocketAddr, trusted_proxy_cidrs: &[String]) -> String {
+    forwarded_ip(req.headers(), peer.ip(), trusted_proxy_cidrs)
+}
+
+fn forwarded_ip(headers: &hyper::HeaderMap, peer_ip: IpAddr, trusted_proxy_cidrs: &[String]) -> String {
+    let trusted_peer = trusted_proxy_cidrs.iter()
+        .filter_map(|cidr| cidr.parse::<ipnet::IpNet>().ok())
+        .any(|network| network.contains(&peer_ip));
+
+    // Forwarding headers are client-controlled unless the direct peer is a trusted proxy.
+    if trusted_peer {
+        for name in ["cf-connecting-ip", "x-forwarded-for"] {
+            if let Some(value) = headers.get(name).and_then(|v| v.to_str().ok()) {
+                let first = value.split(',').next().unwrap_or("").trim();
+                if let Ok(ip) = first.parse::<IpAddr>() {
+                    return ip.to_string();
+                }
+            }
         }
     }
-    peer.ip().to_string()
+    peer_ip.to_string()
 }
 
 fn normalize_host(raw: &str) -> String {
