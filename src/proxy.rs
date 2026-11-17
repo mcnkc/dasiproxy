@@ -41,8 +41,8 @@ pub async fn serve() -> Result<()> {
     let rate_state = Arc::new(tokio::sync::Mutex::new(HashMap::<String, (Instant, u64)>::new()));
     let traffic_window = Arc::new(tokio::sync::Mutex::new((Instant::now(), 0u64)));
 
-    // Re-read JSON data periodically so TUI/CLI edits take effect without restarting.
-    // Keep live request counters in memory and flush them independently from admin edits.
+    // Re-read JSON data only while hot domain detection is enabled.
+    // Traffic counters are flushed independently so disabling hot reload does not lose metrics.
     let state_refresh = state.clone();
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(1));
@@ -57,36 +57,40 @@ pub async fn serve() -> Result<()> {
 
         loop {
             ticker.tick().await;
-            match State::load() {
-                Ok(mut fresh) => {
-                    let mut current = state_refresh.write().await;
-                    fresh.visit_stats = current.visit_stats.clone();
-                    *current = fresh;
+            let current_config = config::load().unwrap_or_default();
 
-                    if last_visit_persist.elapsed() >= Duration::from_secs(15) {
-                        if let Err(err) = current.save_visit_stats() {
-                            warn!(error = %err, "traffic counters could not be persisted");
-                        }
-                        last_visit_persist = Instant::now();
+            if current_config.hot_domain_detect {
+                match State::load() {
+                    Ok(mut fresh) => {
+                        let mut current = state_refresh.write().await;
+                        fresh.visit_stats = current.visit_stats.clone();
+                        *current = fresh;
                     }
-
-                    let current_config = config::load().unwrap_or_default();
-                    let now = Utc::now().timestamp();
-                    let interval_seconds = current_config.priority_evaluate_interval_days.max(1) as i64 * 86_400;
-                    if now - last_priority_evaluation >= interval_seconds {
-                        match current.evaluate_priorities(current_config.priority_top_count) {
-                            Ok(()) => {
-                                last_priority_evaluation = now;
-                                if let Err(err) = fs::write("priority_last_evaluated.txt", now.to_string()).await {
-                                    warn!(error = %err, "priority evaluation timestamp could not be saved");
-                                }
-                                info!("traffic priority list evaluated");
-                            }
-                            Err(err) => warn!(error = %err, "priority evaluation failed"),
-                        }
-                    }
+                    Err(err) => warn!(error = %err, "state refresh failed; keeping previous state"),
                 }
-                Err(err) => warn!(error = %err, "state refresh failed; keeping previous state"),
+            }
+
+            let mut current = state_refresh.write().await;
+            if last_visit_persist.elapsed() >= Duration::from_secs(15) {
+                if let Err(err) = current.save_visit_stats() {
+                    warn!(error = %err, "traffic counters could not be persisted");
+                }
+                last_visit_persist = Instant::now();
+            }
+
+            let now = Utc::now().timestamp();
+            let interval_seconds = current_config.priority_evaluate_interval_days.max(1) as i64 * 86_400;
+            if now - last_priority_evaluation >= interval_seconds {
+                match current.evaluate_priorities(current_config.priority_top_count) {
+                    Ok(()) => {
+                        last_priority_evaluation = now;
+                        if let Err(err) = fs::write("priority_last_evaluated.txt", now.to_string()).await {
+                            warn!(error = %err, "priority evaluation timestamp could not be saved");
+                        }
+                        info!("traffic priority list evaluated");
+                    }
+                    Err(err) => warn!(error = %err, "priority evaluation failed"),
+                }
             }
         }
     });
