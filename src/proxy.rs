@@ -166,6 +166,25 @@ async fn handle(
         return Ok(handle_dp_session_api(&req, &state, &cfg).await);
     }
 
+    // v2 accepted traffic only through Cloudflare by default. Keep that behavior,
+    // but allow an explicit opt-out for local development and non-Cloudflare edges.
+    if cfg.require_cloudflare && !req.headers().contains_key("cf-ray") {
+        return Ok(error_response(StatusCode::FORBIDDEN, 403, "Cloudflare edge required", cfg.prefer_default_static_pages));
+    }
+    if host.is_empty() || host.parse::<IpAddr>().is_ok() {
+        return Ok(error_response(StatusCode::FORBIDDEN, 403, "Direct IP access is disabled", cfg.prefer_default_static_pages));
+    }
+
+    let raw_path = req.uri().path_and_query().map(|value| value.as_str()).unwrap_or("/");
+    let decoded_path = match percent_encoding::percent_decode_str(raw_path).decode_utf8() {
+        Ok(value) => value.to_ascii_lowercase(),
+        Err(_) => return Ok(error_response(StatusCode::BAD_REQUEST, 400, "Malformed URL encoding", cfg.prefer_default_static_pages)),
+    };
+    if waf_blocked(&decoded_path) {
+        warn!(client_ip = %ip, path = %raw_path, "WAF blocked request");
+        return Ok(error_response(StatusCode::FORBIDDEN, 403, "Request blocked by WAF", cfg.prefer_default_static_pages));
+    }
+
     let whitelisted = state_snapshot.whitelist.contains(&ip);
 
     if state_snapshot.blacklist.contains(&ip) && !whitelisted {
@@ -439,6 +458,20 @@ fn api_text_response(status: StatusCode, body: String) -> Response<ProxyBody> {
         .unwrap()
 }
 
+
+fn waf_blocked(decoded_path: &str) -> bool {
+    const PATTERNS: [&str; 7] = [
+        "../",
+        ".env",
+        "union select",
+        "<script>",
+        "javascript:",
+        "base64_decode",
+        "etc/passwd",
+    ];
+    PATTERNS.iter().any(|pattern| decoded_path.contains(pattern))
+}
+
 fn is_websocket_upgrade(req: &Request<Incoming>) -> bool {
     let upgrade = req.headers().get(header::UPGRADE).and_then(|v| v.to_str().ok()).unwrap_or("");
     let connection = req.headers().get(header::CONNECTION).and_then(|v| v.to_str().ok()).unwrap_or("");
@@ -594,6 +627,14 @@ mod tests {
     #[test]
     fn strips_port_from_hostname() {
         assert_eq!(normalize_host("example.com:8080"), "example.com");
+    }
+
+    #[test]
+    fn blocks_common_waf_payloads() {
+        assert!(waf_blocked("/../../etc/passwd"));
+        assert!(waf_blocked("/search?q=union select password"));
+        assert!(waf_blocked("/%3cscript%3e".replace("%3c", "<").replace("%3e", ">").as_str()));
+        assert!(!waf_blocked("/api/users?id=123"));
     }
 
     #[test]
