@@ -531,7 +531,6 @@ fn prompt_hidden(message: &str) -> Result<String> {
                 }
                 _ => {}
             },
-            Event::Paste(text) => value.push_str(&text),
             _ => {}
         }
     }
