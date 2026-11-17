@@ -42,13 +42,50 @@ pub async fn serve() -> Result<()> {
     let traffic_window = Arc::new(tokio::sync::Mutex::new((Instant::now(), 0u64)));
 
     // Re-read JSON data periodically so TUI/CLI edits take effect without restarting.
+    // Keep live request counters in memory and flush them independently from admin edits.
     let state_refresh = state.clone();
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(1));
+        let mut last_visit_persist = Instant::now();
+        let now = Utc::now().timestamp();
+        let mut last_priority_evaluation = fs::read_to_string("priority_last_evaluated.txt")
+            .await.ok().and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or_else(|| {
+                let _ = std::fs::write("priority_last_evaluated.txt", now.to_string());
+                now
+            });
+
         loop {
             ticker.tick().await;
             match State::load() {
-                Ok(fresh) => *state_refresh.write().await = fresh,
+                Ok(mut fresh) => {
+                    let mut current = state_refresh.write().await;
+                    fresh.visit_stats = current.visit_stats.clone();
+                    *current = fresh;
+
+                    if last_visit_persist.elapsed() >= Duration::from_secs(15) {
+                        if let Err(err) = current.save_visit_stats() {
+                            warn!(error = %err, "traffic counters could not be persisted");
+                        }
+                        last_visit_persist = Instant::now();
+                    }
+
+                    let current_config = config::load().unwrap_or_default();
+                    let now = Utc::now().timestamp();
+                    let interval_seconds = current_config.priority_evaluate_interval_days.max(1) as i64 * 86_400;
+                    if now - last_priority_evaluation >= interval_seconds {
+                        match current.evaluate_priorities(current_config.priority_top_count) {
+                            Ok(()) => {
+                                last_priority_evaluation = now;
+                                if let Err(err) = fs::write("priority_last_evaluated.txt", now.to_string()).await {
+                                    warn!(error = %err, "priority evaluation timestamp could not be saved");
+                                }
+                                info!("traffic priority list evaluated");
+                            }
+                            Err(err) => warn!(error = %err, "priority evaluation failed"),
+                        }
+                    }
+                }
                 Err(err) => warn!(error = %err, "state refresh failed; keeping previous state"),
             }
         }
@@ -111,6 +148,10 @@ async fn handle(
         }
     };
 
+    {
+        let mut guard = state.write().await;
+        *guard.visit_stats.entry(host.clone()).or_insert(0) += 1;
+    }
     let state_snapshot = state.read().await.clone();
 
     if cfg.enable_dp_session_api
