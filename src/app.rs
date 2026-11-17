@@ -82,3 +82,20 @@ pub fn set_maintenance(enabled: bool) -> Result<()> {
     println!("Bakım modu: {}", if enabled { "aktif" } else { "pasif" });
     Ok(())
 }
+
+
+pub fn show_status() -> Result<()> {
+    let state = State::load()?;
+    let metrics = crate::metrics::snapshot();
+    println!("dasiiProxy v3");
+    println!("Uptime: {} seconds", metrics.uptime_seconds);
+    println!("Total requests: {}", metrics.total_requests);
+    println!("Completed requests: {}", metrics.completed_requests);
+    println!("In-flight requests: {}", metrics.active_requests);
+    println!("AI crawler blocks: {}", metrics.ai_bot_blocks);
+    println!("Average response: {} ms", metrics.average_response_ms);
+    println!("Virtual hosts: {}", state.vhosts.len());
+    println!("Sessions: {}", state.sessions.len());
+    println!("Blacklist: {} | Whitelist: {}", state.blacklist.len(), state.whitelist.len());
+    Ok(())
+}
