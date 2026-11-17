@@ -2,6 +2,7 @@ mod app;
 mod cli;
 mod config;
 mod integrations;
+mod metrics;
 mod proxy;
 mod state;
 mod tui;
