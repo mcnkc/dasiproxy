@@ -41,6 +41,22 @@ impl State {
         write_json("blacklist.json", &self.blacklist)
     }
 
+    pub fn save_visit_stats(&self) -> Result<()> {
+        write_json("visit_stats.json", &self.visit_stats)
+    }
+
+    pub fn evaluate_priorities(&mut self, top_count: usize) -> Result<()> {
+        let mut ranked: Vec<_> = self.visit_stats.iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(a.1));
+        self.priority_sites = ranked.into_iter()
+            .take(top_count.max(1))
+            .map(|(host, _)| host.clone())
+            .collect();
+        self.visit_stats.clear();
+        write_json("priority_sites.json", &self.priority_sites)?;
+        write_json("visit_stats.json", &self.visit_stats)
+    }
+
     pub fn block(&mut self, raw: &str, enabled: bool) -> Result<()> {
         let ip = normalize_ip(raw)?;
         if enabled { self.blacklist.insert(ip); } else { self.blacklist.remove(&ip); }
