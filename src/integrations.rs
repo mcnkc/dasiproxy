@@ -22,7 +22,7 @@ pub async fn discover_public_ip() -> Result<String> {
         .error_for_status()
         .context("public IP lookup returned an error")?;
     let value = response.text().await?.trim().to_string();
-    let parsed: std::net::Ipv4Addr = value.parse().context("public IP service returned an invalid IPv4 address")?;
+    let parsed: Ipv4Addr = value.parse().context("public IP service returned an invalid IPv4 address")?;
     Ok(parsed.to_string())
 }
 
