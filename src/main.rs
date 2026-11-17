@@ -28,7 +28,11 @@ async fn main() -> Result<()> {
         Command::ConfigSet { key, value } => config::set_value(&key, &value),
         Command::Status => app::show_status(),
         Command::Vhosts => app::list_vhosts(),
-        Command::Sessions => app::list_sessions(),
+        Command::VhostAdd { domain, port } => app::add_vhost(&domain, port).await,
+        Command::VhostRemove { domain } => app::remove_vhost(&domain).await,
+        Command::Sessions { search, page, per_page } => app::list_sessions(search.as_deref(), page, per_page),
+        Command::SessionBan { session_id } => app::set_session_block(&session_id, true),
+        Command::SessionUnban { session_id } => app::set_session_block(&session_id, false),
         Command::Traffic => app::show_traffic(),
         Command::Logs { lines, system } => {
             if system { app::show_runtime_logs(lines) } else { app::show_access_logs(lines) }
