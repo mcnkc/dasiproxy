@@ -137,7 +137,12 @@ async fn draw_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Res
                                             let mut state = crate::state::State::load()?;
                                             state.vhosts.insert(domain.trim().to_ascii_lowercase(), port.to_string());
                                             state.save()?;
-                                            notice = format!("Added {} → {}", domain.trim(), port);
+                                            let cfg = crate::config::load()?;
+                                            match crate::integrations::create_cloudflare_record(&cfg, domain.trim()).await {
+                                                Ok(true) => notice = format!("Added {} → {} • Cloudflare DNS created", domain.trim(), port),
+                                                Ok(false) => notice = format!("Added {} → {}", domain.trim(), port),
+                                                Err(err) => notice = format!("Vhost added; Cloudflare error: {err}"),
+                                            }
                                         } else { notice = "Invalid domain or port".into(); }
                                     } else { notice = "Expected domain:port".into(); }
                                 }
