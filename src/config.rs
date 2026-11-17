@@ -86,7 +86,7 @@ pub fn load() -> Result<Config> {
 pub fn save(cfg: &Config) -> Result<()> {
     let tmp = Path::new("config.json.tmp");
     fs::write(tmp, serde_json::to_vec_pretty(cfg)?)?;
-    fs::rename(tmp, "config.json").context("config.json atomik olarak güncellenemedi")?;
+    replace_file(tmp, Path::new("config.json")).context("config.json güncellenemedi")?;
     Ok(())
 }
 
@@ -194,5 +194,18 @@ mod tests {
         assert_eq!(cfg.ip_whitelist, vec!["127.0.0.1"]);
         assert!(cfg.maintenance_mode);
         assert_eq!(cfg.listen_port, 80);
+    }
+}
+
+
+fn replace_file(temp: &Path, destination: &Path) -> Result<()> {
+    match fs::rename(temp, destination) {
+        Ok(()) => Ok(()),
+        Err(rename_error) if cfg!(windows) && destination.exists() => {
+            fs::remove_file(destination).context("old config file could not be removed")?;
+            fs::rename(temp, destination).context("new config file could not replace old one")?;
+            Ok(())
+        }
+        Err(error) => Err(error).context("file rename failed"),
     }
 }
