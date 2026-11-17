@@ -161,7 +161,7 @@ pub fn set_value(key: &str, value: &str) -> Result<()> {
         "requireCloudflare" => cfg.require_cloudflare = parse_bool()?,
         "serverPublicIp" => {
             if !value.trim().is_empty() {
-                value.trim().parse::<std::net::IpAddr>().context("serverPublicIp geçerli IP adresi olmalı")?;
+                value.trim().parse::<std::net::Ipv4Addr>().context("serverPublicIp geçerli IPv4 adresi olmalı (DNS A kaydı)")?;
             }
             cfg.server_public_ip = value.trim().to_string();
         }
