@@ -52,6 +52,7 @@ pub async fn serve() -> Result<()> {
     let state = Arc::new(tokio::sync::RwLock::new(initial_state));
     let sessions = Arc::new(DashMap::<String, String>::from_iter(initial_sessions));
     let session_dirty = Arc::new(AtomicBool::new(false));
+    let session_cleanup = Arc::new(tokio::sync::Mutex::new(()));
     let visit_stats = Arc::new(DashMap::<String, AtomicU64>::new());
     for (host, count) in initial_visits {
         visit_stats.insert(host, AtomicU64::new(count));
@@ -177,6 +178,7 @@ pub async fn serve() -> Result<()> {
         let state = state.clone();
         let sessions = sessions.clone();
         let session_dirty = session_dirty.clone();
+        let session_cleanup = session_cleanup.clone();
         let visit_stats = visit_stats.clone();
         let config_cache = config_cache.clone();
         let rate_state = rate_state.clone();
@@ -188,13 +190,14 @@ pub async fn serve() -> Result<()> {
                 let state = state.clone();
                 let sessions = sessions.clone();
                 let session_dirty = session_dirty.clone();
+                let session_cleanup = session_cleanup.clone();
                 let visit_stats = visit_stats.clone();
                 let config_cache = config_cache.clone();
                 let rate_state = rate_state.clone();
                 let traffic_window = traffic_window.clone();
                 let client = client.clone();
                 async move {
-                    handle(req, peer, state, sessions, session_dirty, visit_stats, config_cache, rate_state, traffic_window, client).await
+                    handle(req, peer, state, sessions, session_dirty, session_cleanup, visit_stats, config_cache, rate_state, traffic_window, client).await
                 }
             });
             if let Err(err) = auto::Builder::new(TokioExecutor::new())
@@ -213,6 +216,7 @@ async fn handle(
     state: Arc<tokio::sync::RwLock<State>>,
     sessions: Arc<DashMap<String, String>>,
     session_dirty: Arc<AtomicBool>,
+    session_cleanup: Arc<tokio::sync::Mutex<()>>,
     visit_stats: Arc<DashMap<String, AtomicU64>>,
     config_cache: Arc<tokio::sync::RwLock<config::Config>>,
     rate_state: Arc<tokio::sync::Mutex<HashMap<String, (Instant, u64)>>>,
@@ -346,6 +350,14 @@ async fn handle(
     };
     if target.parse::<u16>().is_err() {
         return Ok(error_response(StatusCode::BAD_GATEWAY, 502, "Invalid upstream port", cfg.prefer_default_static_pages));
+    }
+
+    if sessions.len() > 50_000 {
+        let _cleanup = session_cleanup.lock().await;
+        if sessions.len() > 50_000 {
+            sessions.clear();
+            session_dirty.store(true, Ordering::Release);
+        }
     }
 
     let session_id = {
