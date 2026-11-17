@@ -8,7 +8,17 @@ use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::conn::auto,
 };
-use std::{collections::HashMap, convert::Infallible, net::{IpAddr, SocketAddr}, sync::Arc, time::Instant};
+use dashmap::{mapref::entry::Entry, DashMap};
+use std::{
+    collections::HashMap,
+    convert::Infallible,
+    net::{IpAddr, SocketAddr},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
+    time::Instant,
+};
 use tokio::{
     fs::{self, OpenOptions},
     io::{AsyncReadExt, AsyncWriteExt},
@@ -36,7 +46,16 @@ pub async fn serve() -> Result<()> {
             Err(err) => warn!(error = %err, "could not auto-detect public IP"),
         }
     }
-    let state = Arc::new(tokio::sync::RwLock::new(State::load()?));
+    let mut initial_state = State::load()?;
+    let initial_sessions = std::mem::take(&mut initial_state.sessions);
+    let initial_visits = std::mem::take(&mut initial_state.visit_stats);
+    let state = Arc::new(tokio::sync::RwLock::new(initial_state));
+    let sessions = Arc::new(DashMap::<String, String>::from_iter(initial_sessions));
+    let session_dirty = Arc::new(AtomicBool::new(false));
+    let visit_stats = Arc::new(DashMap::<String, AtomicU64>::new());
+    for (host, count) in initial_visits {
+        visit_stats.insert(host, AtomicU64::new(count));
+    }
     let config_cache = Arc::new(tokio::sync::RwLock::new(cfg.clone()));
     let rate_state = Arc::new(tokio::sync::Mutex::new(HashMap::<String, (Instant, u64)>::new()));
     let traffic_window = Arc::new(tokio::sync::Mutex::new((Instant::now(), 0u64)));
@@ -45,6 +64,9 @@ pub async fn serve() -> Result<()> {
     // externally editable routing/security files are reloaded; session history stays in memory.
     let state_refresh = state.clone();
     let config_refresh = config_cache.clone();
+    let sessions_refresh = sessions.clone();
+    let session_dirty_refresh = session_dirty.clone();
+    let visit_stats_refresh = visit_stats.clone();
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(1));
         let mut last_visit_persist = Instant::now();
@@ -87,6 +109,11 @@ pub async fn serve() -> Result<()> {
             {
                 let mut current = state_refresh.write().await;
                 if last_visit_persist.elapsed() >= Duration::from_secs(15) {
+                    let snapshot = visit_stats_refresh
+                        .iter()
+                        .map(|entry| (entry.key().clone(), entry.value().load(Ordering::Relaxed)))
+                        .collect::<HashMap<_, _>>();
+                    current.visit_stats = snapshot;
                     if let Err(err) = current.save_visit_stats() {
                         warn!(error = %err, "traffic counters could not be persisted");
                     }
@@ -96,6 +123,14 @@ pub async fn serve() -> Result<()> {
                 let now = Utc::now().timestamp();
                 let interval_seconds = current_config.priority_evaluate_interval_days.max(1) as i64 * 86_400;
                 if now - last_priority_evaluation >= interval_seconds {
+                    let counters = visit_stats_refresh
+                        .iter()
+                        .filter_map(|entry| {
+                            let count = entry.value().swap(0, Ordering::Relaxed);
+                            (count > 0).then(|| (entry.key().clone(), count))
+                        })
+                        .collect::<HashMap<_, _>>();
+                    current.visit_stats = counters;
                     match current.evaluate_priorities(current_config.priority_top_count) {
                         Ok(()) => {
                             last_priority_evaluation = now;
@@ -111,11 +146,14 @@ pub async fn serve() -> Result<()> {
 
             if last_session_persist.elapsed() >= Duration::from_secs(2) {
                 last_session_persist = Instant::now();
-                let snapshot = state_refresh.read().await.sessions_snapshot_for_persistence();
-                if let Some((revision, sessions)) = snapshot {
-                    match persist_sessions_snapshot(sessions).await {
-                        Ok(()) => state_refresh.write().await.mark_sessions_persisted(revision),
-                        Err(err) => warn!(error = %err, "batched session persistence failed; will retry"),
+                if session_dirty_refresh.swap(false, Ordering::AcqRel) {
+                    let snapshot = sessions_refresh
+                        .iter()
+                        .map(|entry| (entry.key().clone(), entry.value().clone()))
+                        .collect::<HashMap<_, _>>();
+                    if let Err(err) = persist_sessions_snapshot(snapshot).await {
+                        session_dirty_refresh.store(true, Ordering::Release);
+                        warn!(error = %err, "batched session persistence failed; will retry");
                     }
                 }
             }
@@ -137,6 +175,9 @@ pub async fn serve() -> Result<()> {
         let (stream, peer) = listener.accept().await?;
         let io = TokioIo::new(stream);
         let state = state.clone();
+        let sessions = sessions.clone();
+        let session_dirty = session_dirty.clone();
+        let visit_stats = visit_stats.clone();
         let config_cache = config_cache.clone();
         let rate_state = rate_state.clone();
         let traffic_window = traffic_window.clone();
@@ -145,11 +186,16 @@ pub async fn serve() -> Result<()> {
         tokio::spawn(async move {
             let service = hyper::service::service_fn(move |req| {
                 let state = state.clone();
+                let sessions = sessions.clone();
+                let session_dirty = session_dirty.clone();
+                let visit_stats = visit_stats.clone();
                 let config_cache = config_cache.clone();
                 let rate_state = rate_state.clone();
                 let traffic_window = traffic_window.clone();
                 let client = client.clone();
-                async move { handle(req, peer, state, config_cache, rate_state, traffic_window, client).await }
+                async move {
+                    handle(req, peer, state, sessions, session_dirty, visit_stats, config_cache, rate_state, traffic_window, client).await
+                }
             });
             if let Err(err) = auto::Builder::new(TokioExecutor::new())
                 .serve_connection_with_upgrades(io, service)
@@ -165,6 +211,9 @@ async fn handle(
     mut req: Request<Incoming>,
     peer: SocketAddr,
     state: Arc<tokio::sync::RwLock<State>>,
+    sessions: Arc<DashMap<String, String>>,
+    session_dirty: Arc<AtomicBool>,
+    visit_stats: Arc<DashMap<String, AtomicU64>>,
     config_cache: Arc<tokio::sync::RwLock<config::Config>>,
     rate_state: Arc<tokio::sync::Mutex<HashMap<String, (Instant, u64)>>>,
     traffic_window: Arc<tokio::sync::Mutex<(Instant, u64)>>,
@@ -176,17 +225,17 @@ async fn handle(
     let cfg = config_cache.read().await.clone();
     let ip = client_ip(&req, peer, &cfg.trusted_proxy_cidrs);
 
-    let state_snapshot = {
-        let mut guard = state.write().await;
-        *guard.visit_stats.entry(host.clone()).or_insert(0) += 1;
-        guard.request_snapshot(&ip, &host)
-    };
+    visit_stats
+        .entry(host.clone())
+        .or_insert_with(|| AtomicU64::new(0))
+        .fetch_add(1, Ordering::Relaxed);
+    let state_snapshot = state.read().await.request_snapshot(&ip, &host);
 
     if cfg.enable_dp_session_api
         && host.eq_ignore_ascii_case(&cfg.dp_session_api_domain)
         && req.uri().path().starts_with("/dpsession/api/")
     {
-        return Ok(handle_dp_session_api(&req, &state, &cfg).await);
+        return Ok(handle_dp_session_api(&req, &state, &sessions, &cfg).await);
     }
 
     // v2 accepted traffic only through Cloudflare by default. Keep that behavior,
@@ -303,7 +352,15 @@ async fn handle(
         let user_agent = header_text(req.headers(), header::USER_AGENT);
         let language = req.headers().get("accept-language").and_then(|v| v.to_str().ok()).unwrap_or("unknown");
         let fingerprint = format!("{ip}|{}|{}", truncate(&user_agent, 256), truncate(language, 128));
-        state.write().await.get_or_create_session(fingerprint)
+        match sessions.entry(fingerprint) {
+            Entry::Occupied(entry) => entry.get().clone(),
+            Entry::Vacant(entry) => {
+                let id = uuid::Uuid::new_v4().to_string();
+                entry.insert(id.clone());
+                session_dirty.store(true, Ordering::Release);
+                id
+            }
+        }
     };
 
     if cfg.enable_access_logs {
@@ -408,6 +465,7 @@ async fn persist_sessions_snapshot(sessions: HashMap<String, String>) -> Result<
 async fn handle_dp_session_api(
     req: &Request<Incoming>,
     state: &Arc<tokio::sync::RwLock<State>>,
+    sessions: &DashMap<String, String>,
     cfg: &config::Config,
 ) -> Response<ProxyBody> {
     let query = req.uri().query().unwrap_or("");
@@ -432,10 +490,10 @@ async fn handle_dp_session_api(
 
     if let Some(session_id) = ban {
         let mut guard = state.write().await;
-        let matching_ips: Vec<String> = guard.sessions.iter()
-            .filter_map(|(fingerprint, sid)| {
-                if sid == &session_id {
-                    Some(fingerprint.split('|').next().unwrap_or("").to_string())
+        let matching_ips: Vec<String> = sessions.iter()
+            .filter_map(|entry| {
+                if entry.value() == &session_id {
+                    Some(entry.key().split('|').next().unwrap_or("").to_string())
                 } else { None }
             })
             .collect();
@@ -455,10 +513,10 @@ async fn handle_dp_session_api(
 
     if let Some(session_id) = unban {
         let mut guard = state.write().await;
-        let matching_ips: Vec<String> = guard.sessions.iter()
-            .filter_map(|(fingerprint, sid)| {
-                if sid == &session_id {
-                    Some(fingerprint.split('|').next().unwrap_or("").to_string())
+        let matching_ips: Vec<String> = sessions.iter()
+            .filter_map(|entry| {
+                if entry.value() == &session_id {
+                    Some(entry.key().split('|').next().unwrap_or("").to_string())
                 } else { None }
             })
             .collect();

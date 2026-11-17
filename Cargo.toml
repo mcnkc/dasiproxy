@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+dashmap = "6"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }

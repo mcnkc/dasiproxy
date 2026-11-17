@@ -10,10 +10,6 @@ pub struct State {
     pub visit_stats: HashMap<String, u64>,
     pub priority_sites: HashSet<String>,
     pub sessions: HashMap<String, String>,
-    #[serde(skip)]
-    sessions_revision: u64,
-    #[serde(skip)]
-    persisted_sessions_revision: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -57,30 +53,6 @@ impl State {
             blacklisted: self.blacklist.contains(ip),
             priority_site: self.priority_sites.contains(host),
             target: self.vhosts.get(host).cloned(),
-        }
-    }
-
-    pub fn get_or_create_session(&mut self, fingerprint: String) -> String {
-        if let Some(existing) = self.sessions.get(&fingerprint) {
-            return existing.clone();
-        }
-        if self.sessions.len() > 50_000 {
-            self.sessions.clear();
-        }
-        let session_id = uuid::Uuid::new_v4().to_string();
-        self.sessions.insert(fingerprint, session_id.clone());
-        self.sessions_revision = self.sessions_revision.wrapping_add(1);
-        session_id
-    }
-
-    pub fn sessions_snapshot_for_persistence(&self) -> Option<(u64, HashMap<String, String>)> {
-        (self.sessions_revision != self.persisted_sessions_revision)
-            .then(|| (self.sessions_revision, self.sessions.clone()))
-    }
-
-    pub fn mark_sessions_persisted(&mut self, revision: u64) {
-        if self.sessions_revision == revision {
-            self.persisted_sessions_revision = revision;
         }
     }
 
@@ -224,18 +196,4 @@ mod tests {
         assert_eq!(blocked.target, None);
     }
 
-    #[test]
-    fn new_sessions_are_marked_dirty_until_persisted() {
-        let mut state = State::default();
-        assert!(state.sessions_snapshot_for_persistence().is_none());
-
-        let session_id = state.get_or_create_session("203.0.113.7|agent|en".into());
-        assert!(!session_id.is_empty());
-        let (revision, snapshot) = state.sessions_snapshot_for_persistence().unwrap();
-        assert_eq!(snapshot.len(), 1);
-        assert_eq!(snapshot.get("203.0.113.7|agent|en"), Some(&session_id));
-
-        state.mark_sessions_persisted(revision);
-        assert!(state.sessions_snapshot_for_persistence().is_none());
-    }
 }
