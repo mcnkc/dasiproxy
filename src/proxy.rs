@@ -30,6 +30,7 @@ pub async fn serve() -> Result<()> {
     let cfg = config::load()?;
     let state = Arc::new(tokio::sync::RwLock::new(State::load()?));
     let rate_state = Arc::new(tokio::sync::Mutex::new(HashMap::<String, (Instant, u64)>::new()));
+    let traffic_window = Arc::new(tokio::sync::Mutex::new((Instant::now(), 0u64)));
 
     // Re-read JSON data periodically so TUI/CLI edits take effect without restarting.
     let state_refresh = state.clone();
@@ -60,14 +61,16 @@ pub async fn serve() -> Result<()> {
         let io = TokioIo::new(stream);
         let state = state.clone();
         let rate_state = rate_state.clone();
+        let traffic_window = traffic_window.clone();
         let client = client.clone();
 
         tokio::spawn(async move {
             let service = hyper::service::service_fn(move |req| {
                 let state = state.clone();
                 let rate_state = rate_state.clone();
+                let traffic_window = traffic_window.clone();
                 let client = client.clone();
-                async move { handle(req, peer, state, rate_state, client).await }
+                async move { handle(req, peer, state, rate_state, traffic_window, client).await }
             });
             if let Err(err) = auto::Builder::new(TokioExecutor::new())
                 .serve_connection_with_upgrades(io, service)
@@ -84,6 +87,7 @@ async fn handle(
     peer: SocketAddr,
     state: Arc<tokio::sync::RwLock<State>>,
     rate_state: Arc<tokio::sync::Mutex<HashMap<String, (Instant, u64)>>>,
+    traffic_window: Arc<tokio::sync::Mutex<(Instant, u64)>>,
     client: Client<HttpConnector, Incoming>,
 ) -> Result<Response<ProxyBody>, Infallible> {
     let raw_host = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
@@ -108,21 +112,73 @@ async fn handle(
         return Ok(error_response(StatusCode::SERVICE_UNAVAILABLE, 503, "Maintenance mode", cfg.prefer_default_static_pages));
     }
 
-    if !whitelisted && cfg.rate_limit.limit > 0 {
-        let mut limits = rate_state.lock().await;
-        let window = Duration::from_millis(cfg.rate_limit.window.max(1));
+    let high_traffic = {
+        let mut window = traffic_window.lock().await;
         let now = Instant::now();
-        let entry = limits.entry(ip.clone()).or_insert((now, 0));
-        if now.duration_since(entry.0) >= window {
-            *entry = (now, 0);
+        if now.duration_since(window.0) >= Duration::from_secs(60) {
+            *window = (now, 0);
         }
-        entry.1 += 1;
-        if entry.1 > cfg.rate_limit.limit {
+        window.1 += 1;
+        window.1 >= cfg.high_traffic_threshold_requests_per_window.max(1)
+    };
+
+    if !matches!(req.method().as_str(), "GET" | "POST" | "HEAD" | "OPTIONS") {
+        return Ok(error_response(StatusCode::FORBIDDEN, 403, "Method not allowed", cfg.prefer_default_static_pages));
+    }
+
+    let user_agent = header_text(req.headers(), header::USER_AGENT);
+    if user_agent.len() < 5 {
+        return Ok(error_response(StatusCode::FORBIDDEN, 403, "User-Agent required", cfg.prefer_default_static_pages));
+    }
+    if cfg.block_ai_bots {
+        let lower = user_agent.to_ascii_lowercase();
+        const AI_BOT_TOKENS: [&str; 23] = [
+            "claude", "searchbot", "gptbot", "chatgpt", "anthropic", "bytespider",
+            "diffbot", "applebot", "amazonbot", "perplexity", "meta-externalfetcher",
+            "meta-externalagent", "oai-searchbot", "bingbot", "googlebot",
+            "google-cloudvertexbot", "googleother", "duckassistbot", "petalbot",
+            "tiktokspider", "ccbot", "cohere-ai", "youbot",
+        ];
+        if AI_BOT_TOKENS.iter().any(|token| lower.contains(token)) {
+            warn!(client_ip = %ip, user_agent = %user_agent, "AI crawler blocked");
+            return Ok(error_response(StatusCode::FORBIDDEN, 403, "Automated crawler blocked", cfg.prefer_default_static_pages));
+        }
+    }
+
+    if !whitelisted && cfg.rate_limit.limit > 0 {
+        let now = Instant::now();
+        let window = Duration::from_millis(cfg.rate_limit.window.max(1));
+        let (limited, auto_ban) = {
+            let mut limits = rate_state.lock().await;
+            let entry = limits.entry(ip.clone()).or_insert((now, 0));
+            if now.duration_since(entry.0) >= window {
+                *entry = (now, 0);
+            }
+            entry.1 += 1;
+            let count = entry.1;
+            let limited = count > cfg.rate_limit.limit;
+            let auto_ban = count > cfg.rate_limit.limit.saturating_mul(5);
+            if limits.len() > 10_000 {
+                limits.retain(|_, (start, _)| now.duration_since(*start) < window);
+            }
+            (limited, auto_ban)
+        };
+
+        if auto_ban {
+            if let Err(err) = state.write().await.block(&ip, true) {
+                warn!(client_ip = %ip, error = %err, "automatic IP ban could not be persisted");
+            } else {
+                warn!(client_ip = %ip, "automatic IP ban applied");
+            }
+            return Ok(error_response(StatusCode::FORBIDDEN, 403, "Automatically blocked", cfg.prefer_default_static_pages));
+        }
+
+        let priority_allowed = cfg.enable_priority_by_traffic
+            && high_traffic
+            && state_snapshot.priority_sites.contains(&host);
+        if limited && !priority_allowed {
             warn!(client_ip = %ip, "rate limit exceeded");
             return Ok(error_response(StatusCode::TOO_MANY_REQUESTS, 429, "Too many requests", cfg.prefer_default_static_pages));
-        }
-        if limits.len() > 10_000 {
-            limits.retain(|_, (start, _)| now.duration_since(*start) < window);
         }
     }
 
@@ -145,6 +201,9 @@ async fn handle(
         match guard.sessions.get(&fingerprint) {
             Some(existing) => existing.clone(),
             None => {
+                if guard.sessions.len() > 50_000 {
+                    guard.sessions.clear();
+                }
                 let id = Uuid::new_v4().to_string();
                 guard.sessions.insert(fingerprint, id.clone());
                 if let Err(err) = guard.save_sessions() {
