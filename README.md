@@ -29,7 +29,7 @@ cargo run -- serve
 cargo run -- vhosts
 cargo run -- ban 203.0.113.10
 cargo run -- unban 203.0.113.10
-cargo run -- maintenance true
+cargo run -- maintenance --enabled true
 cargo run -- config --show
 ```
 
@@ -41,12 +41,16 @@ to an unprivileged port while testing.
 
 The Rust version reads/writes the existing file names where appropriate:
 `config.json`, `vhosts.json`, `blacklist.json`, `priority_sites.json`,
-`visit_stats.json`, and `dpsessions.json`.
+`visit_stats.json`, and `dpsessions.json`. Legacy camelCase config keys are
+supported.
 
 ## Rewrite status
 
-This branch contains the initial Rust application, CLI, terminal menu, JSON state
-handling, and HTTP reverse-proxy foundation. Full parity (WebSocket tunnelling,
-Cloudflare DNS automation, Discord alerts, advanced traffic prioritisation,
-session API, and all legacy security filters) is still being ported and must be
-validated before replacing a production v2 instance.
+The initial Rust application includes the CLI, terminal menu, JSON state handling,
+IP allow/deny lists, maintenance mode, per-IP rate limiting, session identifiers,
+daily access logs, and an HTTP reverse-proxy foundation.
+
+Full production parity is not yet complete. WebSocket tunnelling, TLS termination
+(if needed outside Cloudflare), Cloudflare DNS automation, Discord alerts, advanced
+traffic prioritisation, AI-bot filtering, and all legacy edge-case behaviours still
+need to be ported and tested before replacing a production v2 instance.
