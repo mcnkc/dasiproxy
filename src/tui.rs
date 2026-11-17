@@ -21,7 +21,7 @@ use std::{
 };
 use tokio::task::JoinHandle;
 
-const ITEMS: [&str; 30] = [
+const ITEMS: [&str; 31] = [
     "Overview",
     "Virtual Hosts",
     "Blacklist",
@@ -51,6 +51,7 @@ const ITEMS: [&str; 30] = [
     "Unban Session UUID",
     "Add IP to Whitelist",
     "Remove IP from Whitelist",
+    "Toggle Hot Domain Detection",
     "Quit",
 ];
 
@@ -351,7 +352,14 @@ async fn draw_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Res
                                 detail = panel_detail(3)?;
                             }
                         }
-                        29 => break,
+                        29 => {
+                            let mut cfg = crate::config::load()?;
+                            cfg.hot_domain_detect = !cfg.hot_domain_detect;
+                            crate::config::save(&cfg)?;
+                            notice = format!("Hot domain detection {}", on_off(cfg.hot_domain_detect));
+                            detail = panel_detail(9)?;
+                        }
+                        30 => break,
                         _ => {}
                     },
                     _ => {}
@@ -377,7 +385,8 @@ fn panel_detail(selected: usize) -> Result<String> {
             cfg.listen_address, cfg.listen_port,
             on_off(cfg.maintenance_mode), on_off(cfg.block_ai_bots), on_off(cfg.enable_access_logs),
             on_off(cfg.prefer_default_static_pages), on_off(cfg.enable_priority_by_traffic),
-            on_off(cfg.enable_dp_session_api), on_off(cfg.enable_cloudflare)
+            on_off(cfg.enable_dp_session_api), on_off(cfg.enable_cloudflare),
+            on_off(cfg.hot_domain_detect)
         ),
         1 => {
             let mut items: Vec<_> = state.vhosts.iter().collect();
