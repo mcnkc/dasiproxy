@@ -26,12 +26,14 @@ cargo build --release
 ```bash
 cargo run -- tui
 cargo run -- serve
+cargo run -- status
 cargo run -- vhosts
 cargo run -- sessions
 cargo run -- traffic
 cargo run -- logs --lines 80
 cargo run -- logs --system --lines 80
 cargo run -- config-set maintenanceMode true
+cargo run -- config-set blockAIBots true
 cargo run -- config-set trustedProxyCidrs "127.0.0.1/32,10.0.0.0/8"
 cargo run -- ban 203.0.113.10
 cargo run -- unban 203.0.113.10
