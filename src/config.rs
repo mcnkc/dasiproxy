@@ -188,19 +188,42 @@ pub fn set_value(key: &str, value: &str) -> Result<()> {
 pub fn import_legacy(dir: &PathBuf) -> Result<()> {
     for name in ["config.json", "vhosts.json", "blacklist.json", "priority_sites.json", "visit_stats.json", "dpsessions.json"] {
         let source = dir.join(name);
-        if source.exists() {
-            let raw = fs::read_to_string(&source).with_context(|| format!("{} okunamadı", source.display()))?;
-            let _: serde_json::Value = serde_json::from_str(&raw).with_context(|| format!("{} geçersiz JSON", source.display()))?;
-            let target = Path::new(name);
-            if !target.exists() {
-                let tmp = target.with_extension("json.import.tmp");
-                fs::write(&tmp, raw)?;
-                fs::rename(&tmp, target)?;
-                println!("İçe aktarıldı: {name}");
-            } else {
-                println!("Atlandı (zaten var): {name}");
+        let target = Path::new(name);
+
+        if !source.exists() {
+            continue;
+        }
+
+        let source_path = source.canonicalize()
+            .with_context(|| format!("{} yolu çözümlenemedi", source.display()))?;
+        if target.exists() {
+            let target_path = target.canonicalize()
+                .with_context(|| format!("{} yolu çözümlenemedi", target.display()))?;
+            if source_path == target_path {
+                println!("Atlandı (kaynak zaten hedef dosya): {name}");
+                continue;
             }
         }
+
+        let raw = fs::read_to_string(&source)
+            .with_context(|| format!("{} okunamadı", source.display()))?;
+        let _: serde_json::Value = serde_json::from_str(&raw)
+            .with_context(|| format!("{} geçersiz JSON", source.display()))?;
+
+        if target.exists() {
+            let backup = PathBuf::from(format!("{name}.pre-rust.bak"));
+            if !backup.exists() {
+                fs::copy(target, &backup)
+                    .with_context(|| format!("{} için yedek oluşturulamadı", target.display()))?;
+                println!("Yedeklendi: {}", backup.display());
+            }
+        }
+
+        let tmp = PathBuf::from(format!("{name}.import.tmp"));
+        fs::write(&tmp, raw)?;
+        replace_file(&tmp, target)
+            .with_context(|| format!("{name} içe aktarılamadı"))?;
+        println!("İçe aktarıldı: {name}");
     }
     Ok(())
 }
