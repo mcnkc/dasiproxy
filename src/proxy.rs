@@ -86,8 +86,8 @@ async fn handle(
     rate_state: Arc<tokio::sync::Mutex<HashMap<String, (Instant, u64)>>>,
     client: Client<HttpConnector, Incoming>,
 ) -> Result<Response<ProxyBody>, Infallible> {
-    let raw_host = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("");
-    let host = normalize_host(raw_host);
+    let raw_host = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let host = normalize_host(&raw_host);
     let ip = client_ip(&req, peer);
 
     let cfg = match config::load() {
