@@ -21,7 +21,7 @@ use std::{
 };
 use tokio::task::JoinHandle;
 
-const ITEMS: [&str; 27] = [
+const ITEMS: [&str; 28] = [
     "Overview",
     "Virtual Hosts",
     "Blacklist",
@@ -488,14 +488,18 @@ fn on_off(value: bool) -> &'static str {
     if value { "ON" } else { "OFF" }
 }
 
-fn prompt(message: &str) -> Result<Option<String>> {
+fn prompt_any(message: &str) -> Result<Option<String>> {
     disable_raw_mode()?;
-    print!("\n{message}");
+    print!("\\n{message}");
     io::stdout().flush()?;
     let mut input = String::new();
     let result = io::stdin().read_line(&mut input);
     enable_raw_mode()?;
     result?;
-    let input = input.trim().to_string();
-    if input.is_empty() { Ok(None) } else { Ok(Some(input)) }
+    Ok(Some(input.trim().to_string()))
+}
+
+fn prompt(message: &str) -> Result<Option<String>> {
+    let value = prompt_any(message)?;
+    Ok(value.filter(|input| !input.is_empty()))
 }
