@@ -119,3 +119,27 @@ pub fn import_legacy(dir: &PathBuf) -> Result<()> {
     }
     Ok(())
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_legacy_camel_case_config() {
+        let cfg: Config = serde_json::from_str(r#"{
+            "hotDomainDetect": false,
+            "enableAccessLogs": true,
+            "rateLimit": { "limit": 45, "window": 30000 },
+            "ipWhitelist": ["127.0.0.1"],
+            "maintenanceMode": true
+        }"#).unwrap();
+
+        assert!(!cfg.hot_domain_detect);
+        assert_eq!(cfg.rate_limit.limit, 45);
+        assert_eq!(cfg.rate_limit.window, 30000);
+        assert_eq!(cfg.ip_whitelist, vec!["127.0.0.1"]);
+        assert!(cfg.maintenance_mode);
+        assert_eq!(cfg.listen_port, 80);
+    }
+}
