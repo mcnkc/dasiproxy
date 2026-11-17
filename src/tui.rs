@@ -191,7 +191,7 @@ async fn draw_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Res
                         }
                         16 => {
                             let domain = prompt("dpSession API domain: ")?;
-                            let key = prompt("dpSession API secret: ")?;
+                            let key = Some(prompt_hidden("dpSession API secret (hidden): ")?);
                             if let (Some(domain), Some(key)) = (domain, key) {
                                 let domain = domain.trim().to_ascii_lowercase();
                                 if domain.is_empty() || key.trim().is_empty() {
@@ -208,7 +208,7 @@ async fn draw_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Res
                             detail = panel_detail(9)?;
                         }
                         17 => {
-                            if let Some(webhook) = prompt_any("Discord webhook URL (empty clears it): ")? {
+                            if let Some(webhook) = Some(prompt_hidden("Discord webhook URL (hidden; empty clears it): ")?) {
                                 let mut cfg = crate::config::load()?;
                                 cfg.discord_webhook = webhook.trim().to_string();
                                 crate::config::save(&cfg)?;
@@ -238,7 +238,7 @@ async fn draw_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Res
                             detail = panel_detail(9)?;
                         }
                         19 => {
-                            let token = prompt("Cloudflare API token: ")?;
+                            let token = Some(prompt_hidden("Cloudflare API token (hidden): ")?);
                             let zone = prompt("Cloudflare Zone ID: ")?;
                             let public_ip = prompt_any("Public IP (empty = auto-detect): ")?;
                             if let (Some(token), Some(zone), Some(public_ip)) = (token, zone, public_ip) {
@@ -487,6 +487,35 @@ fn show_set(title: &str, mut values: Vec<String>) -> String {
 
 fn on_off(value: bool) -> &'static str {
     if value { "ON" } else { "OFF" }
+}
+
+
+fn prompt_hidden(message: &str) -> Result<String> {
+    print!("\\n{message}");
+    io::stdout().flush()?;
+    let mut value = String::new();
+    loop {
+        match event::read()? {
+            Event::Key(key) => match key.code {
+                KeyCode::Enter => break,
+                KeyCode::Esc => {
+                    value.clear();
+                    break;
+                }
+                KeyCode::Backspace => {
+                    value.pop();
+                }
+                KeyCode::Char(character) if !key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                    value.push(character);
+                }
+                _ => {}
+            },
+            Event::Paste(text) => value.push_str(&text),
+            _ => {}
+        }
+    }
+    println!();
+    Ok(value)
 }
 
 fn prompt_any(message: &str) -> Result<Option<String>> {
