@@ -1,4 +1,7 @@
 use anyhow::Result;
+use chrono::Utc;
+use std::{fs, path::Path};
+
 use crate::state::State;
 
 pub fn list_vhosts() -> Result<()> {
@@ -8,6 +11,52 @@ pub fn list_vhosts() -> Result<()> {
     }
     for (domain, port) in state.vhosts {
         println!("{domain:<40} → {port}");
+    }
+    Ok(())
+}
+
+pub fn list_sessions() -> Result<()> {
+    let state = State::load()?;
+    println!("Tracked sessions: {}", state.sessions.len());
+    for (fingerprint, sid) in state.sessions.iter().take(100) {
+        let ip = fingerprint.split('|').next().unwrap_or("unknown");
+        println!("{sid}  {ip}  {}", fingerprint.split('|').nth(1).unwrap_or("unknown"));
+    }
+    if state.sessions.len() > 100 {
+        println!("... {} more sessions", state.sessions.len() - 100);
+    }
+    Ok(())
+}
+
+pub fn show_traffic() -> Result<()> {
+    let state = State::load()?;
+    let mut visits: Vec<_> = state.visit_stats.iter().collect();
+    visits.sort_by(|a, b| b.1.cmp(a.1));
+    println!("Hosts recorded: {}", state.visit_stats.len());
+    println!("Priority hosts: {}", state.priority_sites.len());
+    for (host, count) in visits.into_iter().take(20) {
+        println!("{host:<40} {count:>10} requests");
+    }
+    if !state.priority_sites.is_empty() {
+        println!("\nPriority allowlist:");
+        for host in state.priority_sites {
+            println!("  {host}");
+        }
+    }
+    Ok(())
+}
+
+pub fn show_access_logs(lines: usize) -> Result<()> {
+    let path = format!("logs/access-{}.log", Utc::now().format("%Y-%m-%d"));
+    if !Path::new(&path).exists() {
+        println!("No access log created for today.");
+        return Ok(());
+    }
+    let content = fs::read_to_string(path)?;
+    let entries: Vec<_> = content.lines().collect();
+    let start = entries.len().saturating_sub(lines.min(10_000));
+    for line in &entries[start..] {
+        println!("{line}");
     }
     Ok(())
 }
