@@ -15,7 +15,7 @@ use ratatui::{
 use std::{io::{self, Write}, time::Duration};
 use tokio::task::JoinHandle;
 
-const ITEMS: [&str; 13] = [
+const ITEMS: [&str; 14] = [
     "Overview",
     "Virtual Hosts",
     "Blacklist",
@@ -28,6 +28,7 @@ const ITEMS: [&str; 13] = [
     "Ban IP",
     "Unban IP",
     "Add IP to Whitelist",
+    "Remove IP from Whitelist",
     "Quit",
 ];
 
@@ -118,7 +119,7 @@ async fn draw_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Res
                                 crate::config::save(&cfg)?;
                                 notice = format!("Maintenance mode {}", if cfg.maintenance_mode { "enabled" } else { "disabled" });
                             }
-                            5 => notice = format!("Configuration: {}:{} • rate limit {}/{}ms",
+                            5 => notice = format!("Config: {}:{} • rate limit {}/{}ms",
                                 cfg.listen_address, cfg.listen_port, cfg.rate_limit.limit, cfg.rate_limit.window),
                             6 => {
                                 if proxy_task.as_ref().is_some_and(|task| !task.is_finished()) {
@@ -149,20 +150,25 @@ async fn draw_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Res
                                     } else { notice = "Domain not found".into(); }
                                 }
                             }
-                            9 | 10 | 11 => {
-                                let prompt_text = if selected == 9 { "IP to ban: " } else if selected == 10 { "IP to unban: " } else { "IP to whitelist: " };
+                            9 | 10 | 11 | 12 => {
+                                let prompt_text = match selected {
+                                    9 => "IP to ban: ",
+                                    10 => "IP to unban: ",
+                                    11 => "IP to whitelist: ",
+                                    _ => "IP to remove from whitelist: ",
+                                };
                                 if let Some(ip) = prompt(prompt_text)? {
                                     let mut state = crate::state::State::load()?;
-                                    if selected == 11 {
-                                        state.whitelist(&ip, true)?;
-                                        notice = format!("Whitelisted {ip}");
+                                    if selected == 11 || selected == 12 {
+                                        state.whitelist(&ip, selected == 11)?;
+                                        notice = format!("{} whitelist: {ip}", if selected == 11 { "Added to" } else { "Removed from" });
                                     } else {
                                         state.block(&ip, selected == 9)?;
                                         notice = format!("{} {ip}", if selected == 9 { "Banned" } else { "Unbanned" });
                                     }
                                 }
                             }
-                            12 => break,
+                            13 => break,
                             _ => {}
                         }
                     }
