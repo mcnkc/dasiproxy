@@ -24,5 +24,6 @@
     "cfApiToken": "",
     "cfZoneId": "",
     "listenAddress": "0.0.0.0",
-    "listenPort": 80
+    "listenPort": 80,
+    "trustedProxyCidrs": []
 }
