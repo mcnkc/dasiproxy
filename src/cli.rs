@@ -16,6 +16,8 @@ pub enum Command {
     Serve,
     /// Display or validate configuration
     Config { #[arg(long)] show: bool },
+    /// Update a config key (example: config-set maintenanceMode true)
+    ConfigSet { key: String, value: String },
     /// List configured virtual hosts
     Vhosts,
     /// List tracked dpSessions
