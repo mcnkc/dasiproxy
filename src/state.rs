@@ -87,8 +87,15 @@ fn read_json<T: DeserializeOwned + Default>(name: &str) -> Result<T> {
 fn write_json<T: Serialize>(name: &str, value: &T) -> Result<()> {
     let tmp = format!("{name}.tmp");
     fs::write(&tmp, serde_json::to_vec_pretty(value)?)?;
-    fs::rename(tmp, name).with_context(|| format!("{name} güncellenemedi"))?;
-    Ok(())
+    match fs::rename(&tmp, name) {
+        Ok(()) => Ok(()),
+        Err(_) if cfg!(windows) && Path::new(name).exists() => {
+            fs::remove_file(name).with_context(|| format!("{name} eski dosyası silinemedi"))?;
+            fs::rename(&tmp, name).with_context(|| format!("{name} güncellenemedi"))?;
+            Ok(())
+        }
+        Err(error) => Err(error).with_context(|| format!("{name} güncellenemedi")),
+    }
 }
 
 
