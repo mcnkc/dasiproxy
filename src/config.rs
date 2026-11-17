@@ -29,6 +29,7 @@ pub struct Config {
     pub listen_address: String,
     pub listen_port: u16,
     pub trusted_proxy_cidrs: Vec<String>,
+    pub require_cloudflare: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +70,7 @@ impl Default for Config {
             listen_address: "0.0.0.0".into(),
             listen_port: 80,
             trusted_proxy_cidrs: Vec::new(),
+            require_cloudflare: true,
         }
     }
 }
@@ -156,6 +158,7 @@ pub fn set_value(key: &str, value: &str) -> Result<()> {
         "discordWebhook" => cfg.discord_webhook = value.trim().to_string(),
         "cfApiToken" => cfg.cf_api_token = value.trim().to_string(),
         "cfZoneId" => cfg.cf_zone_id = value.trim().to_string(),
+        "requireCloudflare" => cfg.require_cloudflare = parse_bool()?,
         "serverPublicIp" => {
             if !value.trim().is_empty() {
                 value.trim().parse::<std::net::IpAddr>().context("serverPublicIp geçerli IP adresi olmalı")?;
