@@ -4,7 +4,7 @@ on:
   push:
     branches: [rust-v3]
   pull_request:
-    branches: [rust-v3]
+    branches: [repo.daskolik.git]
 
 jobs:
   build:
