@@ -70,6 +70,31 @@ impl State {
         cfg.ip_whitelist = self.whitelist.iter().cloned().collect();
         crate::config::save(&cfg)
     }
+
+    pub fn set_session_ban(&mut self, session_id: &str, enabled: bool) -> Result<Vec<String>> {
+        let matched_ips: HashSet<String> = self.sessions.iter()
+            .filter_map(|(fingerprint, sid)| {
+                if sid == session_id {
+                    fingerprint.split('|').next().and_then(|raw| normalize_ip(raw).ok())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut changed = Vec::new();
+        for ip in matched_ips {
+            let updated = if enabled {
+                self.blacklist.insert(ip.clone())
+            } else {
+                self.blacklist.remove(&ip)
+            };
+            if updated { changed.push(ip); }
+        }
+        changed.sort();
+        self.save_blacklist()?;
+        Ok(changed)
+    }
 }
 
 pub fn normalize_ip(raw: &str) -> Result<String> {
