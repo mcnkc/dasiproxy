@@ -310,17 +310,18 @@ async fn handle(
     };
     *req.uri_mut() = upstream_uri;
 
-    if let Ok(value) = format!("127.0.0.1:{target}").parse() {
-        req.headers_mut().insert(header::HOST, value);
+    // Preserve the original Host header so upstream virtual-host routing keeps working.
+    if let Ok(value) = raw_host.parse() {
+        req.headers_mut().insert("x-forwarded-host", value);
     }
     if let Ok(value) = ip.parse() {
         req.headers_mut().insert("x-forwarded-for", value);
     }
-    if let Ok(value) = raw_host.parse() {
-        req.headers_mut().insert("x-forwarded-host", value);
-    }
     req.headers_mut().insert("x-proxy-session-id", session_id.parse().unwrap_or_else(|_| header::HeaderValue::from_static("")));
-    req.headers_mut().insert("x-forwarded-proto", header::HeaderValue::from_static("http"));
+    // Keep the TLS scheme provided by Cloudflare/another trusted edge.
+    if !req.headers().contains_key("x-forwarded-proto") {
+        req.headers_mut().insert("x-forwarded-proto", header::HeaderValue::from_static("http"));
+    }
 
     if is_websocket_upgrade(&req) {
         return match websocket_proxy(req, &target).await {
