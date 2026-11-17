@@ -239,3 +239,25 @@ fn error_response(status: StatusCode, code: u16, fallback: &str, use_static: boo
         .header(header::CACHE_CONTROL, "no-store")
         .body(full(page)).unwrap()
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_port_from_hostname() {
+        assert_eq!(normalize_host("example.com:8080"), "example.com");
+    }
+
+    #[test]
+    fn handles_bracketed_ipv6_host() {
+        assert_eq!(normalize_host("[::1]:8080"), "::1");
+    }
+
+    #[test]
+    fn truncates_only_at_utf8_boundaries() {
+        let input = "a".repeat(254) + "ğ";
+        assert!(truncate(&input, 255).is_char_boundary(truncate(&input, 255).len()));
+    }
+}
