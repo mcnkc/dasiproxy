@@ -7,6 +7,7 @@ Cargo.lock
 *.log
 config.json.tmp
 *.json.tmp
+priority_last_evaluated.txt
 *.import.tmp
 
 # Local editor files
