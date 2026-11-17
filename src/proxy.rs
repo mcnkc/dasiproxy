@@ -370,7 +370,9 @@ async fn handle_dp_session_api(
         }
     }
 
-    if auth.as_deref() != Some(cfg.dp_session_api_key.as_str()) {
+    if cfg.dp_session_api_key.trim().is_empty()
+        || auth.as_deref() != Some(cfg.dp_session_api_key.as_str())
+    {
         return api_text_response(StatusCode::FORBIDDEN, "Geçersiz Yetki Kodu (Auth Mismatch)".into());
     }
 
