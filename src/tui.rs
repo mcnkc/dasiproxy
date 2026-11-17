@@ -21,7 +21,7 @@ use std::{
 };
 use tokio::task::JoinHandle;
 
-const ITEMS: [&str; 28] = [
+const ITEMS: [&str; 30] = [
     "Overview",
     "Virtual Hosts",
     "Blacklist",
@@ -47,6 +47,8 @@ const ITEMS: [&str; 28] = [
     "Remove Virtual Host",
     "Ban IP",
     "Unban IP",
+    "Ban Session UUID",
+    "Unban Session UUID",
     "Add IP to Whitelist",
     "Remove IP from Whitelist",
     "Quit",
@@ -319,27 +321,37 @@ async fn draw_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Res
                                 }
                             }
                         }
-                        23..=26 => {
-                            let prompt_text = match selected {
-                                23 => "IP to ban: ",
-                                24 => "IP to unban: ",
-                                25 => "IP to whitelist: ",
-                                _ => "IP to remove from whitelist: ",
-                            };
+                        23 | 24 => {
+                            let prompt_text = if selected == 23 { "IP to ban: " } else { "IP to unban: " };
                             if let Some(ip) = prompt(prompt_text)? {
                                 let mut state = crate::state::State::load()?;
-                                if selected == 25 || selected == 26 {
-                                    state.whitelist(&ip, selected == 25)?;
-                                    notice = format!("{} whitelist: {ip}", if selected == 25 { "Added to" } else { "Removed from" });
-                                    detail = panel_detail(3)?;
-                                } else {
-                                    state.block(&ip, selected == 23)?;
-                                    notice = format!("{} {ip}", if selected == 23 { "Banned" } else { "Unbanned" });
-                                    detail = panel_detail(2)?;
-                                }
+                                state.block(&ip, selected == 23)?;
+                                notice = format!("{} {ip}", if selected == 23 { "Banned" } else { "Unbanned" });
+                                detail = panel_detail(2)?;
                             }
                         }
-                        27 => break,
+                        25 | 26 => {
+                            if let Some(session_id) = prompt("Session UUID: ")? {
+                                let mut state = crate::state::State::load()?;
+                                let changed = state.set_session_ban(&session_id, selected == 25)?;
+                                notice = if changed.is_empty() {
+                                    "No IPs matched this session UUID".into()
+                                } else {
+                                    format!("{} session IPs: {}", if selected == 25 { "Banned" } else { "Unbanned" }, changed.join(", "))
+                                };
+                                detail = panel_detail(4)?;
+                            }
+                        }
+                        27 | 28 => {
+                            let prompt_text = if selected == 27 { "IP to whitelist: " } else { "IP to remove from whitelist: " };
+                            if let Some(ip) = prompt(prompt_text)? {
+                                let mut state = crate::state::State::load()?;
+                                state.whitelist(&ip, selected == 27)?;
+                                notice = format!("{} whitelist: {ip}", if selected == 27 { "Added to" } else { "Removed from" });
+                                detail = panel_detail(3)?;
+                            }
+                        }
+                        29 => break,
                         _ => {}
                     },
                     _ => {}
