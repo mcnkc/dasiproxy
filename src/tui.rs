@@ -379,7 +379,7 @@ fn panel_detail(selected: usize) -> Result<String> {
     let metrics = crate::metrics::snapshot();
     let detail = match selected {
         0 => format!(
-            "dasiiProxy v3\n\nVirtual hosts: {}\nBlacklist entries: {}\nWhitelist entries: {}\nTracked sessions: {}\nTracked hosts: {}\nPriority hosts: {}\n\nListener: {}:{}\nMaintenance: {}\nAI bot blocking: {}\nAccess logs: {}\nStatic error pages: {}\nPriority routing: {}\ndpSession API: {}\nCloudflare DNS: {}",
+            "dasiiProxy v3\n\nVirtual hosts: {}\nBlacklist entries: {}\nWhitelist entries: {}\nTracked sessions: {}\nTracked hosts: {}\nPriority hosts: {}\n\nListener: {}:{}\nMaintenance: {}\nAI bot blocking: {}\nAccess logs: {}\nStatic error pages: {}\nPriority routing: {}\ndpSession API: {}\nCloudflare DNS: {}\\nHot domain detection: {}",
             state.vhosts.len(), state.blacklist.len(), state.whitelist.len(),
             state.sessions.len(), state.visit_stats.len(), state.priority_sites.len(),
             cfg.listen_address, cfg.listen_port,
