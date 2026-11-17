@@ -136,6 +136,7 @@ async fn handle(
     traffic_window: Arc<tokio::sync::Mutex<(Instant, u64)>>,
     client: Client<HttpConnector, Incoming>,
 ) -> Result<Response<ProxyBody>, Infallible> {
+    let _request_metrics = crate::metrics::begin_request();
     let raw_host = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     let host = normalize_host(&raw_host);
     let ip = client_ip(&req, peer);
@@ -198,6 +199,7 @@ async fn handle(
             "tiktokspider", "ccbot", "cohere-ai", "youbot",
         ];
         if AI_BOT_TOKENS.iter().any(|token| lower.contains(token)) {
+            crate::metrics::record_ai_bot_block();
             warn!(client_ip = %ip, user_agent = %user_agent, "AI crawler blocked");
             return Ok(error_response(StatusCode::FORBIDDEN, 403, "Automated crawler blocked", cfg.prefer_default_static_pages));
         }
