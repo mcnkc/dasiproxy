@@ -99,3 +99,29 @@ pub fn show_status() -> Result<()> {
     println!("Blacklist: {} | Whitelist: {}", state.blacklist.len(), state.whitelist.len());
     Ok(())
 }
+
+
+pub fn show_runtime_logs(lines: usize) -> Result<()> {
+    let directory = Path::new("logs");
+    if !directory.exists() {
+        println!("No runtime logs found.");
+        return Ok(());
+    }
+    let mut files = fs::read_dir(directory)?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with("runtime.log")))
+        .collect::<Vec<_>>();
+    files.sort();
+    let Some(path) = files.pop() else {
+        println!("No runtime logs found.");
+        return Ok(());
+    };
+    let content = fs::read_to_string(path)?;
+    let entries: Vec<_> = content.lines().collect();
+    let start = entries.len().saturating_sub(lines.min(10_000));
+    for line in &entries[start..] {
+        println!("{line}");
+    }
+    Ok(())
+}
