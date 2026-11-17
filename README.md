@@ -51,6 +51,11 @@ Running the proxy on port 80 generally requires elevated privileges or a Linux
 capability such as `CAP_NET_BIND_SERVICE`. Set `listenPort` in `config.json`
 to an unprivileged port while testing.
 
+Cloudflare edge enforcement is enabled by default (`requireCloudflare: true`),
+matching v2 behavior: HTTP requests without a `CF-Ray` header are rejected.
+Disable it with `cargo run -- config-set requireCloudflare false` only when
+intentionally running behind another trusted edge or during local development.
+
 Forwarding headers such as `CF-Connecting-IP` and `X-Forwarded-For` are only
 trusted when the direct TCP peer matches a CIDR in `trustedProxyCidrs`. Keep
 this list empty when clients connect directly. When Cloudflare or another edge
@@ -71,7 +76,8 @@ supported.
 
 The initial Rust version includes the TUI/CLI, HTTP and WebSocket proxying, vhost
 routing, error pages, IP allow/deny lists, maintenance mode, request-method and
-AI-crawler filters, per-IP rate limiting with automatic bans, session identifiers,
+AI-crawler filters, Cloudflare-only edge checks, direct-IP blocking, WAF path
+filters, per-IP rate limiting with automatic bans, session identifiers,
 daily access logs, hot state reload, traffic counters and periodic priority-host
 evaluation. TUI panels cover overview, vhosts, IP lists, sessions, traffic,
 access logs and configuration.
