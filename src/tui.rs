@@ -491,7 +491,7 @@ fn on_off(value: bool) -> &'static str {
 
 fn prompt_any(message: &str) -> Result<Option<String>> {
     disable_raw_mode()?;
-    print!("\\n{message}");
+    print!("\n{message}");
     io::stdout().flush()?;
     let mut input = String::new();
     let result = io::stdin().read_line(&mut input);
