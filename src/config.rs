@@ -119,21 +119,35 @@ pub fn set_value(key: &str, value: &str) -> Result<()> {
     };
 
     match key {
-        "listenAddress" => cfg.listen_address = value.trim().to_string(),
-        "listenPort" => cfg.listen_port = value.parse().context("listenPort 1-65535 arası sayı olmalı")?,
+        "listenAddress" => {
+            if value.trim().is_empty() { anyhow::bail!("listenAddress boş olamaz"); }
+            cfg.listen_address = value.trim().to_string();
+        }
+        "listenPort" => {
+            let port = value.parse::<u16>().context("listenPort 1-65535 arası sayı olmalı")?;
+            if port == 0 { anyhow::bail!("listenPort 0 olamaz"); }
+            cfg.listen_port = port;
+        }
         "hotDomainDetect" => cfg.hot_domain_detect = parse_bool()?,
         "enableAccessLogs" => cfg.enable_access_logs = parse_bool()?,
         "enablePriorityByTraffic" => cfg.enable_priority_by_traffic = parse_bool()?,
         "enableDpSessionApi" => {
-            if parse_bool()? && cfg.dp_session_api_key.trim().is_empty() {
-                anyhow::bail!("Önce dpSessionApiKey ayarlamalısın");
+            let enabled = parse_bool()?;
+            if enabled && (cfg.dp_session_api_key.trim().is_empty() || cfg.dp_session_api_domain.trim().is_empty()) {
+                anyhow::bail!("Önce dpSessionApiDomain ve dpSessionApiKey ayarlamalısın");
             }
-            cfg.enable_dp_session_api = parse_bool()?;
+            cfg.enable_dp_session_api = enabled;
         }
         "blockAIBots" => cfg.block_ai_bots = parse_bool()?,
         "preferDefaultStaticPages" => cfg.prefer_default_static_pages = parse_bool()?,
         "maintenanceMode" => cfg.maintenance_mode = parse_bool()?,
-        "enableCloudflare" => cfg.enable_cloudflare = parse_bool()?,
+        "enableCloudflare" => {
+            let enabled = parse_bool()?;
+            if enabled && (cfg.cf_api_token.trim().is_empty() || cfg.cf_zone_id.trim().is_empty()) {
+                anyhow::bail!("Önce cfApiToken ve cfZoneId ayarlamalısın");
+            }
+            cfg.enable_cloudflare = enabled;
+        }
         "dpSessionApiDomain" => cfg.dp_session_api_domain = value.trim().to_ascii_lowercase(),
         "dpSessionApiKey" => {
             if value.trim().is_empty() { anyhow::bail!("dpSessionApiKey boş bırakılamaz"); }
@@ -142,7 +156,12 @@ pub fn set_value(key: &str, value: &str) -> Result<()> {
         "discordWebhook" => cfg.discord_webhook = value.trim().to_string(),
         "cfApiToken" => cfg.cf_api_token = value.trim().to_string(),
         "cfZoneId" => cfg.cf_zone_id = value.trim().to_string(),
-        "serverPublicIp" => cfg.server_public_ip = value.trim().to_string(),
+        "serverPublicIp" => {
+            if !value.trim().is_empty() {
+                value.trim().parse::<std::net::IpAddr>().context("serverPublicIp geçerli IP adresi olmalı")?;
+            }
+            cfg.server_public_ip = value.trim().to_string();
+        }
         "trustedProxyCidrs" => {
             cfg.trusted_proxy_cidrs = value.split(',')
                 .map(str::trim)
