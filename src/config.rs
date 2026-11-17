@@ -93,10 +93,63 @@ pub fn save(cfg: &Config) -> Result<()> {
 pub fn print_config(show: bool) -> Result<()> {
     let cfg = load()?;
     if show {
-        println!("{}", serde_json::to_string_pretty(&cfg)?);
+        let mut value = serde_json::to_value(&cfg)?;
+        for key in ["dashboardPassword", "dpSessionApiKey", "discordWebhook", "cfApiToken"] {
+            if value.get(key).and_then(|item| item.as_str()).is_some_and(|secret| !secret.is_empty()) {
+                value[key] = serde_json::Value::String("********".into());
+            }
+        }
+        println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         println!("config.json geçerli. Listen: {}:{}", cfg.listen_address, cfg.listen_port);
     }
+    Ok(())
+}
+
+pub fn set_value(key: &str, value: &str) -> Result<()> {
+    let mut cfg = load()?;
+    let parse_bool = || -> Result<bool> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "on" | "yes" => Ok(true),
+            "false" | "0" | "off" | "no" => Ok(false),
+            _ => anyhow::bail!("Boolean değer true/false olmalı"),
+        }
+    };
+
+    match key {
+        "listenAddress" => cfg.listen_address = value.trim().to_string(),
+        "listenPort" => cfg.listen_port = value.parse().context("listenPort 1-65535 arası sayı olmalı")?,
+        "hotDomainDetect" => cfg.hot_domain_detect = parse_bool()?,
+        "enableAccessLogs" => cfg.enable_access_logs = parse_bool()?,
+        "enablePriorityByTraffic" => cfg.enable_priority_by_traffic = parse_bool()?,
+        "enableDpSessionApi" => {
+            if parse_bool()? && cfg.dp_session_api_key.trim().is_empty() {
+                anyhow::bail!("Önce dpSessionApiKey ayarlamalısın");
+            }
+            cfg.enable_dp_session_api = parse_bool()?;
+        }
+        "blockAIBots" => cfg.block_ai_bots = parse_bool()?,
+        "preferDefaultStaticPages" => cfg.prefer_default_static_pages = parse_bool()?,
+        "maintenanceMode" => cfg.maintenance_mode = parse_bool()?,
+        "enableCloudflare" => cfg.enable_cloudflare = parse_bool()?,
+        "dpSessionApiDomain" => cfg.dp_session_api_domain = value.trim().to_ascii_lowercase(),
+        "dpSessionApiKey" => {
+            if value.trim().is_empty() { anyhow::bail!("dpSessionApiKey boş bırakılamaz"); }
+            cfg.dp_session_api_key = value.trim().to_string();
+        }
+        "discordWebhook" => cfg.discord_webhook = value.trim().to_string(),
+        "cfApiToken" => cfg.cf_api_token = value.trim().to_string(),
+        "cfZoneId" => cfg.cf_zone_id = value.trim().to_string(),
+        "serverPublicIp" => cfg.server_public_ip = value.trim().to_string(),
+        "rateLimit.limit" => cfg.rate_limit.limit = value.parse().context("rateLimit.limit sayı olmalı")?,
+        "rateLimit.window" => cfg.rate_limit.window = value.parse().context("rateLimit.window sayı olmalı")?,
+        "priorityEvaluateIntervalDays" => cfg.priority_evaluate_interval_days = value.parse().context("priorityEvaluateIntervalDays sayı olmalı")?,
+        "priorityTopCount" => cfg.priority_top_count = value.parse().context("priorityTopCount sayı olmalı")?,
+        _ => anyhow::bail!("Bilinmeyen ayar: {key}"),
+    }
+
+    save(&cfg)?;
+    println!("{key} güncellendi.");
     Ok(())
 }
 
