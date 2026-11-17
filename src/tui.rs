@@ -356,6 +356,7 @@ async fn draw_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Res
 fn panel_detail(selected: usize) -> Result<String> {
     let cfg = crate::config::load()?;
     let state = crate::state::State::load()?;
+    let metrics = crate::metrics::snapshot();
     let detail = match selected {
         0 => format!(
             "dasiiProxy v3\n\nVirtual hosts: {}\nBlacklist entries: {}\nWhitelist entries: {}\nTracked sessions: {}\nTracked hosts: {}\nPriority hosts: {}\n\nListener: {}:{}\nMaintenance: {}\nAI bot blocking: {}\nAccess logs: {}\nStatic error pages: {}\nPriority routing: {}\ndpSession API: {}\nCloudflare DNS: {}",
