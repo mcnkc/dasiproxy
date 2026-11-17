@@ -16,13 +16,15 @@
     "blockAIBots": false,
     "preferDefaultStaticPages": true,
     "maintenanceMode": false,
-    "ipWhitelist": [
-       
-    ],
+    "ipWhitelist": [],
     "discordWebhook": "",
     "serverPublicIp": "",
     "enableCloudflare": false,
-    "version": "v2.1  // May 2026",
+    "version": "v3.0.0",
     "cfApiToken": "",
-    "cfZoneId": ""
+    "cfZoneId": "",
+    "listenAddress": "0.0.0.0",
+    "listenPort": 80,
+    "trustedProxyCidrs": [],
+    "requireCloudflare": true
 }

@@ -1,0 +1,776 @@
+use anyhow::{Context, Result};
+use bytes::Bytes;
+use chrono::Utc;
+use http_body_util::{combinators::BoxBody, BodyExt, Full};
+use hyper::{body::Incoming, header, Request, Response, StatusCode};
+use hyper_util::{
+    client::legacy::{connect::HttpConnector, Client},
+    rt::{TokioExecutor, TokioIo},
+    server::conn::auto,
+};
+use dashmap::{mapref::entry::Entry, DashMap};
+use std::{
+    collections::HashMap,
+    convert::Infallible,
+    net::{IpAddr, SocketAddr},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
+    time::Instant,
+};
+use tokio::{
+    fs::{self, OpenOptions},
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    time::{interval, Duration},
+};
+use tracing::{error, info, warn};
+
+use crate::{config, state::{State, normalize_ip}};
+
+type ProxyBody = BoxBody<Bytes, hyper::Error>;
+
+fn full(value: impl Into<Bytes>) -> ProxyBody {
+    Full::new(value.into()).map_err(|never: Infallible| match never {}).boxed()
+}
+
+pub async fn serve() -> Result<()> {
+    let mut cfg = config::load()?;
+    if cfg.server_public_ip.trim().is_empty() {
+        match crate::integrations::discover_public_ip().await {
+            Ok(ip) => {
+                cfg.server_public_ip = ip;
+                config::save(&cfg)?;
+            }
+            Err(err) => warn!(error = %err, "could not auto-detect public IP"),
+        }
+    }
+    let mut initial_state = State::load()?;
+    let initial_sessions = std::mem::take(&mut initial_state.sessions);
+    let initial_visits = std::mem::take(&mut initial_state.visit_stats);
+    let state = Arc::new(tokio::sync::RwLock::new(initial_state));
+    let sessions = Arc::new(DashMap::<String, String>::from_iter(initial_sessions));
+    let session_dirty = Arc::new(AtomicBool::new(false));
+    let session_cleanup = Arc::new(tokio::sync::Mutex::new(()));
+    let visit_stats = Arc::new(DashMap::<String, AtomicU64>::new());
+    for (host, count) in initial_visits {
+        visit_stats.insert(host, AtomicU64::new(count));
+    }
+    let config_cache = Arc::new(tokio::sync::RwLock::new(cfg.clone()));
+    let rate_state = Arc::new(tokio::sync::Mutex::new(HashMap::<String, (Instant, u64)>::new()));
+    let traffic_window = Arc::new(tokio::sync::Mutex::new((Instant::now(), 0u64)));
+
+    // Config is refreshed once per second, not from the request hot path. Only
+    // externally editable routing/security files are reloaded; session history stays in memory.
+    let state_refresh = state.clone();
+    let config_refresh = config_cache.clone();
+    let sessions_refresh = sessions.clone();
+    let session_dirty_refresh = session_dirty.clone();
+    let visit_stats_refresh = visit_stats.clone();
+    tokio::spawn(async move {
+        let mut ticker = interval(Duration::from_secs(1));
+        let mut last_visit_persist = Instant::now();
+        let mut last_session_persist = Instant::now();
+        let now = Utc::now().timestamp();
+        let mut last_priority_evaluation = fs::read_to_string("priority_last_evaluated.txt")
+            .await.ok().and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or_else(|| {
+                let _ = std::fs::write("priority_last_evaluated.txt", now.to_string());
+                now
+            });
+
+        loop {
+            ticker.tick().await;
+            let current_config = match config::load() {
+                Ok(fresh) => {
+                    *config_refresh.write().await = fresh.clone();
+                    fresh
+                }
+                Err(err) => {
+                    warn!(error = %err, "config reload failed; retaining last valid configuration");
+                    config_refresh.read().await.clone()
+                }
+            };
+
+            if current_config.hot_domain_detect {
+                match tokio::task::spawn_blocking(State::load_hot_reload).await {
+                    Ok(Ok(fresh)) => {
+                        let mut current = state_refresh.write().await;
+                        current.vhosts = fresh.vhosts;
+                        current.blacklist = fresh.blacklist;
+                        current.priority_sites = fresh.priority_sites;
+                        current.whitelist = current_config.ip_whitelist.iter().cloned().collect();
+                    }
+                    Ok(Err(err)) => warn!(error = %err, "hot reload failed; retaining current state"),
+                    Err(err) => warn!(error = %err, "hot reload worker failed"),
+                }
+            }
+
+            {
+                let mut current = state_refresh.write().await;
+                if last_visit_persist.elapsed() >= Duration::from_secs(15) {
+                    let snapshot = visit_stats_refresh
+                        .iter()
+                        .map(|entry| (entry.key().clone(), entry.value().load(Ordering::Relaxed)))
+                        .collect::<HashMap<_, _>>();
+                    current.visit_stats = snapshot;
+                    if let Err(err) = current.save_visit_stats() {
+                        warn!(error = %err, "traffic counters could not be persisted");
+                    }
+                    last_visit_persist = Instant::now();
+                }
+
+                let now = Utc::now().timestamp();
+                let interval_seconds = current_config.priority_evaluate_interval_days.max(1) as i64 * 86_400;
+                if now - last_priority_evaluation >= interval_seconds {
+                    let counters = visit_stats_refresh
+                        .iter()
+                        .filter_map(|entry| {
+                            let count = entry.value().swap(0, Ordering::Relaxed);
+                            (count > 0).then(|| (entry.key().clone(), count))
+                        })
+                        .collect::<HashMap<_, _>>();
+                    current.visit_stats = counters;
+                    match current.evaluate_priorities(current_config.priority_top_count) {
+                        Ok(()) => {
+                            last_priority_evaluation = now;
+                            if let Err(err) = fs::write("priority_last_evaluated.txt", now.to_string()).await {
+                                warn!(error = %err, "priority evaluation timestamp could not be saved");
+                            }
+                            info!("traffic priority list evaluated");
+                        }
+                        Err(err) => warn!(error = %err, "priority evaluation failed"),
+                    }
+                }
+            }
+
+            if last_session_persist.elapsed() >= Duration::from_secs(2) {
+                last_session_persist = Instant::now();
+                if session_dirty_refresh.swap(false, Ordering::AcqRel) {
+                    let snapshot = sessions_refresh
+                        .iter()
+                        .map(|entry| (entry.key().clone(), entry.value().clone()))
+                        .collect::<HashMap<_, _>>();
+                    if let Err(err) = persist_sessions_snapshot(snapshot).await {
+                        session_dirty_refresh.store(true, Ordering::Release);
+                        warn!(error = %err, "batched session persistence failed; will retry");
+                    }
+                }
+            }
+        }
+    });
+
+    let addr: SocketAddr = format!("{}:{}", cfg.listen_address, cfg.listen_port)
+        .parse()
+        .context("Proxy listen address geçersiz")?;
+    let listener = TcpListener::bind(addr)
+        .await
+        .context("Proxy portuna bind edilemedi (80 için sudo veya CAP_NET_BIND_SERVICE gerekebilir)")?;
+    let connector = HttpConnector::new();
+    let client: Client<_, Incoming> = Client::builder(TokioExecutor::new()).build(connector);
+
+    info!("dasiiProxy v3 listening on {addr}");
+
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        let io = TokioIo::new(stream);
+        let state = state.clone();
+        let sessions = sessions.clone();
+        let session_dirty = session_dirty.clone();
+        let session_cleanup = session_cleanup.clone();
+        let visit_stats = visit_stats.clone();
+        let config_cache = config_cache.clone();
+        let rate_state = rate_state.clone();
+        let traffic_window = traffic_window.clone();
+        let client = client.clone();
+
+        tokio::spawn(async move {
+            let service = hyper::service::service_fn(move |req| {
+                let state = state.clone();
+                let sessions = sessions.clone();
+                let session_dirty = session_dirty.clone();
+                let session_cleanup = session_cleanup.clone();
+                let visit_stats = visit_stats.clone();
+                let config_cache = config_cache.clone();
+                let rate_state = rate_state.clone();
+                let traffic_window = traffic_window.clone();
+                let client = client.clone();
+                async move {
+                    handle(req, peer, state, sessions, session_dirty, session_cleanup, visit_stats, config_cache, rate_state, traffic_window, client).await
+                }
+            });
+            if let Err(err) = auto::Builder::new(TokioExecutor::new())
+                .serve_connection_with_upgrades(io, service)
+                .await
+            {
+                error!(%peer, error = %err, "connection failed");
+            }
+        });
+    }
+}
+
+async fn handle(
+    mut req: Request<Incoming>,
+    peer: SocketAddr,
+    state: Arc<tokio::sync::RwLock<State>>,
+    sessions: Arc<DashMap<String, String>>,
+    session_dirty: Arc<AtomicBool>,
+    session_cleanup: Arc<tokio::sync::Mutex<()>>,
+    visit_stats: Arc<DashMap<String, AtomicU64>>,
+    config_cache: Arc<tokio::sync::RwLock<config::Config>>,
+    rate_state: Arc<tokio::sync::Mutex<HashMap<String, (Instant, u64)>>>,
+    traffic_window: Arc<tokio::sync::Mutex<(Instant, u64)>>,
+    client: Client<HttpConnector, Incoming>,
+) -> Result<Response<ProxyBody>, Infallible> {
+    let _request_metrics = crate::metrics::begin_request();
+    let raw_host = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let host = normalize_host(&raw_host);
+    let cfg = config_cache.read().await.clone();
+    let ip = client_ip(&req, peer, &cfg.trusted_proxy_cidrs);
+
+    visit_stats
+        .entry(host.clone())
+        .or_insert_with(|| AtomicU64::new(0))
+        .fetch_add(1, Ordering::Relaxed);
+    let state_snapshot = state.read().await.request_snapshot(&ip, &host);
+
+    if cfg.enable_dp_session_api
+        && host.eq_ignore_ascii_case(&cfg.dp_session_api_domain)
+        && req.uri().path().starts_with("/dpsession/api/")
+    {
+        return Ok(handle_dp_session_api(&req, &state, &sessions, &cfg).await);
+    }
+
+    // v2 accepted traffic only through Cloudflare by default. Keep that behavior,
+    // but allow an explicit opt-out for local development and non-Cloudflare edges.
+    if cfg.require_cloudflare && !req.headers().contains_key("cf-ray") {
+        return Ok(error_response(StatusCode::FORBIDDEN, 403, "Cloudflare edge required", cfg.prefer_default_static_pages));
+    }
+    if host.is_empty() || host.parse::<IpAddr>().is_ok() {
+        return Ok(error_response(StatusCode::FORBIDDEN, 403, "Direct IP access is disabled", cfg.prefer_default_static_pages));
+    }
+
+    let raw_path = req.uri().path_and_query().map(|value| value.as_str()).unwrap_or("/");
+    let decoded_path = match percent_encoding::percent_decode_str(raw_path).decode_utf8() {
+        Ok(value) => value.to_ascii_lowercase(),
+        Err(_) => return Ok(error_response(StatusCode::BAD_REQUEST, 400, "Malformed URL encoding", cfg.prefer_default_static_pages)),
+    };
+    if waf_blocked(&decoded_path) {
+        warn!(client_ip = %ip, path = %raw_path, "WAF blocked request");
+        return Ok(error_response(StatusCode::FORBIDDEN, 403, "Request blocked by WAF", cfg.prefer_default_static_pages));
+    }
+
+    let whitelisted = state_snapshot.whitelisted;
+
+    if state_snapshot.blacklisted && !whitelisted {
+        return Ok(error_response(StatusCode::FORBIDDEN, 403, "Forbidden", cfg.prefer_default_static_pages));
+    }
+    if cfg.maintenance_mode && !whitelisted {
+        return Ok(error_response(StatusCode::SERVICE_UNAVAILABLE, 503, "Maintenance mode", cfg.prefer_default_static_pages));
+    }
+
+    let high_traffic = {
+        let mut window = traffic_window.lock().await;
+        let now = Instant::now();
+        if now.duration_since(window.0) >= Duration::from_secs(60) {
+            *window = (now, 0);
+        }
+        window.1 += 1;
+        window.1 >= cfg.high_traffic_threshold_requests_per_window.max(1)
+    };
+
+    if !matches!(req.method().as_str(), "GET" | "POST" | "HEAD" | "OPTIONS") {
+        return Ok(error_response(StatusCode::FORBIDDEN, 403, "Method not allowed", cfg.prefer_default_static_pages));
+    }
+
+    let user_agent = header_text(req.headers(), header::USER_AGENT);
+    if user_agent.len() < 5 {
+        return Ok(error_response(StatusCode::FORBIDDEN, 403, "User-Agent required", cfg.prefer_default_static_pages));
+    }
+    if cfg.block_ai_bots {
+        let lower = user_agent.to_ascii_lowercase();
+        const AI_BOT_TOKENS: [&str; 23] = [
+            "claude", "searchbot", "gptbot", "chatgpt", "anthropic", "bytespider",
+            "diffbot", "applebot", "amazonbot", "perplexity", "meta-externalfetcher",
+            "meta-externalagent", "oai-searchbot", "bingbot", "googlebot",
+            "google-cloudvertexbot", "googleother", "duckassistbot", "petalbot",
+            "tiktokspider", "ccbot", "cohere-ai", "youbot",
+        ];
+        if AI_BOT_TOKENS.iter().any(|token| lower.contains(token)) {
+            crate::metrics::record_ai_bot_block();
+            warn!(client_ip = %ip, user_agent = %user_agent, "AI crawler blocked");
+            return Ok(error_response(StatusCode::FORBIDDEN, 403, "Automated crawler blocked", cfg.prefer_default_static_pages));
+        }
+    }
+
+    if !whitelisted && cfg.rate_limit.limit > 0 {
+        let now = Instant::now();
+        let window = Duration::from_millis(cfg.rate_limit.window.max(1));
+        let (limited, auto_ban) = {
+            let mut limits = rate_state.lock().await;
+            let entry = limits.entry(ip.clone()).or_insert((now, 0));
+            if now.duration_since(entry.0) >= window {
+                *entry = (now, 0);
+            }
+            entry.1 += 1;
+            let count = entry.1;
+            let limited = count > cfg.rate_limit.limit;
+            let auto_ban = count > cfg.rate_limit.limit.saturating_mul(5);
+            if limits.len() > 10_000 {
+                limits.retain(|_, (start, _)| now.duration_since(*start) < window);
+            }
+            (limited, auto_ban)
+        };
+
+        if auto_ban {
+            if let Err(err) = state.write().await.block(&ip, true) {
+                warn!(client_ip = %ip, error = %err, "automatic IP ban could not be persisted");
+            } else {
+                warn!(client_ip = %ip, "automatic IP ban applied");
+            }
+            return Ok(error_response(StatusCode::FORBIDDEN, 403, "Automatically blocked", cfg.prefer_default_static_pages));
+        }
+
+        let priority_allowed = cfg.enable_priority_by_traffic
+            && high_traffic
+            && state_snapshot.priority_site;
+        if limited && !priority_allowed {
+            warn!(client_ip = %ip, "rate limit exceeded");
+            return Ok(error_response(StatusCode::TOO_MANY_REQUESTS, 429, "Too many requests", cfg.prefer_default_static_pages));
+        }
+    }
+
+    let target = match state_snapshot.target {
+        Some(target) if target == "maintenance" => {
+            return Ok(error_response(StatusCode::SERVICE_UNAVAILABLE, 503, "Maintenance", cfg.prefer_default_static_pages));
+        }
+        Some(target) => target,
+        None => return Ok(error_response(StatusCode::NOT_FOUND, 404, "Unknown host", cfg.prefer_default_static_pages)),
+    };
+    if target.parse::<u16>().is_err() {
+        return Ok(error_response(StatusCode::BAD_GATEWAY, 502, "Invalid upstream port", cfg.prefer_default_static_pages));
+    }
+
+    if sessions.len() > 50_000 {
+        let _cleanup = session_cleanup.lock().await;
+        if sessions.len() > 50_000 {
+            sessions.clear();
+            session_dirty.store(true, Ordering::Release);
+        }
+    }
+
+    let session_id = {
+        let user_agent = header_text(req.headers(), header::USER_AGENT);
+        let language = req.headers().get("accept-language").and_then(|v| v.to_str().ok()).unwrap_or("unknown");
+        let fingerprint = format!("{ip}|{}|{}", truncate(&user_agent, 256), truncate(language, 128));
+        match sessions.entry(fingerprint) {
+            Entry::Occupied(entry) => entry.get().clone(),
+            Entry::Vacant(entry) => {
+                let id = uuid::Uuid::new_v4().to_string();
+                entry.insert(id.clone());
+                session_dirty.store(true, Ordering::Release);
+                id
+            }
+        }
+    };
+
+    if cfg.enable_access_logs {
+        if let Err(err) = write_access_log(&ip, &req, &host, &session_id).await {
+            warn!(error = %err, "access log write failed");
+        }
+    }
+
+    let path = req.uri().path_and_query().map(|value| value.as_str()).unwrap_or("/");
+    let upstream_uri = match format!("http://127.0.0.1:{target}{path}").parse() {
+        Ok(uri) => uri,
+        Err(_) => return Ok(error_response(StatusCode::BAD_REQUEST, 400, "Bad request", cfg.prefer_default_static_pages)),
+    };
+    *req.uri_mut() = upstream_uri;
+
+    // Preserve the original Host header so upstream virtual-host routing keeps working.
+    if let Ok(value) = raw_host.parse() {
+        req.headers_mut().insert("x-forwarded-host", value);
+    }
+    if let Ok(value) = ip.parse() {
+        req.headers_mut().insert("x-forwarded-for", value);
+    }
+    req.headers_mut().insert("x-proxy-session-id", session_id.parse().unwrap_or_else(|_| header::HeaderValue::from_static("")));
+    // Keep the TLS scheme provided by Cloudflare/another trusted edge.
+    if !req.headers().contains_key("x-forwarded-proto") {
+        req.headers_mut().insert("x-forwarded-proto", header::HeaderValue::from_static("http"));
+    }
+
+    if is_websocket_upgrade(&req) {
+        return match websocket_proxy(req, &target).await {
+            Ok(response) => Ok(response),
+            Err(err) => {
+                error!(domain = %host, error = %err, "websocket upstream failed");
+                let alert_cfg = cfg.clone();
+                let alert_domain = host.clone();
+                let alert_error = err.to_string();
+                tokio::spawn(async move {
+                    if let Err(alert_err) = crate::integrations::notify_proxy_error(&alert_cfg, &alert_domain, &alert_error).await {
+                        warn!(error = %alert_err, "Discord error alert failed");
+                    }
+                });
+                Ok(error_response(StatusCode::BAD_GATEWAY, 502, "WebSocket Bad Gateway", cfg.prefer_default_static_pages))
+            }
+        };
+    }
+
+    match client.request(req).await {
+        Ok(response) => {
+            let (mut parts, body) = response.into_parts();
+            for (name, value) in [
+                (header::HeaderName::from_static("x-frame-options"), header::HeaderValue::from_static("DENY")),
+                (header::HeaderName::from_static("x-content-type-options"), header::HeaderValue::from_static("nosniff")),
+                (header::HeaderName::from_static("referrer-policy"), header::HeaderValue::from_static("no-referrer")),
+                (header::HeaderName::from_static("permissions-policy"), header::HeaderValue::from_static("geolocation=(), camera=()")),
+            ] {
+                parts.headers.insert(name, value);
+            }
+            let status_code = parts.status.as_u16();
+            if cfg.prefer_default_static_pages && matches!(status_code, 400 | 401 | 403 | 404 | 429 | 500 | 502 | 503 | 504 | 505) {
+                return Ok(error_response(parts.status, status_code, "Upstream error", true));
+            }
+            Ok(Response::from_parts(parts, body.boxed()))
+        }
+        Err(err) => {
+            error!(domain = %host, error = %err, "upstream request failed");
+            let alert_cfg = cfg.clone();
+            let alert_domain = host.clone();
+            let alert_error = err.to_string();
+            tokio::spawn(async move {
+                if let Err(alert_err) = crate::integrations::notify_proxy_error(&alert_cfg, &alert_domain, &alert_error).await {
+                    warn!(error = %alert_err, "Discord error alert failed");
+                }
+            });
+            Ok(error_response(StatusCode::BAD_GATEWAY, 502, "Bad Gateway", cfg.prefer_default_static_pages))
+        }
+    }
+}
+
+
+
+
+
+async fn persist_sessions_snapshot(sessions: HashMap<String, String>) -> Result<()> {
+    let serialized = tokio::task::spawn_blocking(move || serde_json::to_vec_pretty(&sessions))
+        .await
+        .context("session serialization worker failed")??;
+    tokio::fs::write("dpsessions.json.tmp", serialized)
+        .await
+        .context("temporary session file could not be written")?;
+
+    if cfg!(windows) && tokio::fs::try_exists("dpsessions.json").await.unwrap_or(false) {
+        tokio::fs::remove_file("dpsessions.json")
+            .await
+            .context("old session file could not be replaced on Windows")?;
+    }
+    tokio::fs::rename("dpsessions.json.tmp", "dpsessions.json")
+        .await
+        .context("session file could not be committed")?;
+    Ok(())
+}
+
+async fn handle_dp_session_api(
+    req: &Request<Incoming>,
+    state: &Arc<tokio::sync::RwLock<State>>,
+    sessions: &DashMap<String, String>,
+    cfg: &config::Config,
+) -> Response<ProxyBody> {
+    let query = req.uri().query().unwrap_or("");
+    let params = url::form_urlencoded::parse(query.as_bytes());
+    let mut auth = None;
+    let mut ban = None;
+    let mut unban = None;
+    for (key, value) in params {
+        match key.as_ref() {
+            "auth" => auth = Some(value.into_owned()),
+            "ban" => ban = Some(value.into_owned()),
+            "unban" => unban = Some(value.into_owned()),
+            _ => {}
+        }
+    }
+
+    if cfg.dp_session_api_key.trim().is_empty()
+        || auth.as_deref() != Some(cfg.dp_session_api_key.as_str())
+    {
+        return api_text_response(StatusCode::FORBIDDEN, "Geçersiz Yetki Kodu (Auth Mismatch)".into());
+    }
+
+    if let Some(session_id) = ban {
+        let mut guard = state.write().await;
+        let matching_ips: Vec<String> = sessions.iter()
+            .filter_map(|entry| {
+                if entry.value() == &session_id {
+                    Some(entry.key().split('|').next().unwrap_or("").to_string())
+                } else { None }
+            })
+            .collect();
+        let mut banned = Vec::new();
+        for raw_ip in matching_ips {
+            if let Ok(ip) = normalize_ip(&raw_ip) {
+                if guard.blacklist.insert(ip.clone()) { banned.push(ip); }
+            }
+        }
+        if let Err(err) = guard.save_blacklist() {
+            warn!(error = %err, "dpSession API could not persist blacklist");
+            return api_text_response(StatusCode::INTERNAL_SERVER_ERROR, "Kara liste kaydedilemedi".into());
+        }
+        let detail = if banned.is_empty() { "Eşleşen IP bulunamadı".into() } else { banned.join(", ") };
+        return api_text_response(StatusCode::OK, format!("Session [ {session_id} ] BANLANDI. Yasaklanan IP'ler: {detail}"));
+    }
+
+    if let Some(session_id) = unban {
+        let mut guard = state.write().await;
+        let matching_ips: Vec<String> = sessions.iter()
+            .filter_map(|entry| {
+                if entry.value() == &session_id {
+                    Some(entry.key().split('|').next().unwrap_or("").to_string())
+                } else { None }
+            })
+            .collect();
+        let mut unbanned = Vec::new();
+        for raw_ip in matching_ips {
+            if let Ok(ip) = normalize_ip(&raw_ip) {
+                if guard.blacklist.remove(&ip) { unbanned.push(ip); }
+            }
+        }
+        if let Err(err) = guard.save_blacklist() {
+            warn!(error = %err, "dpSession API could not persist blacklist");
+            return api_text_response(StatusCode::INTERNAL_SERVER_ERROR, "Kara liste kaydedilemedi".into());
+        }
+        let detail = if unbanned.is_empty() { "Eşleşen IP bulunamadı".into() } else { unbanned.join(", ") };
+        return api_text_response(StatusCode::OK, format!("Session [ {session_id} ] BAN KALDIRILDI. İzin açılan IP'ler: {detail}"));
+    }
+
+    api_text_response(StatusCode::BAD_REQUEST, "Geçersiz İstek (Parametre Eksik)".into())
+}
+
+fn api_text_response(status: StatusCode, body: String) -> Response<ProxyBody> {
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(full(body))
+        .unwrap()
+}
+
+
+fn waf_blocked(decoded_path: &str) -> bool {
+    const PATTERNS: [&str; 7] = [
+        "../",
+        ".env",
+        "union select",
+        "<script>",
+        "javascript:",
+        "base64_decode",
+        "etc/passwd",
+    ];
+    PATTERNS.iter().any(|pattern| decoded_path.contains(pattern))
+}
+
+fn is_websocket_upgrade(req: &Request<Incoming>) -> bool {
+    let upgrade = req.headers().get(header::UPGRADE).and_then(|v| v.to_str().ok()).unwrap_or("");
+    let connection = req.headers().get(header::CONNECTION).and_then(|v| v.to_str().ok()).unwrap_or("");
+    upgrade.eq_ignore_ascii_case("websocket")
+        && connection.split(',').any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+}
+
+async fn websocket_proxy(mut req: Request<Incoming>, target: &str) -> Result<Response<ProxyBody>> {
+    let on_upgrade = hyper::upgrade::on(&mut req);
+    let port = target.parse::<u16>().context("invalid WebSocket upstream port")?;
+    let mut upstream = TcpStream::connect(("127.0.0.1", port)).await
+        .context("could not connect to WebSocket upstream")?;
+
+    let path = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let mut head = format!("{} {} HTTP/1.1\r\n", req.method(), path);
+    for (name, value) in req.headers() {
+        let value = value.to_str().context("invalid request header encoding")?;
+        head.push_str(name.as_str());
+        head.push_str(": ");
+        head.push_str(value);
+        head.push_str("\r\n");
+    }
+    head.push_str("\r\n");
+    upstream.write_all(head.as_bytes()).await.context("could not forward WebSocket handshake")?;
+
+    let mut response_bytes = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 2048];
+    let header_end = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let n = upstream.read(&mut chunk).await?;
+            if n == 0 { anyhow::bail!("upstream closed before WebSocket handshake completed"); }
+            response_bytes.extend_from_slice(&chunk[..n]);
+            if response_bytes.len() > 65_536 { anyhow::bail!("upstream WebSocket headers exceed 64 KiB"); }
+            if let Some(pos) = find_header_end(&response_bytes) { break Ok::<usize, anyhow::Error>(pos + 4); }
+        }
+    }).await.context("WebSocket handshake timed out")??;
+
+    let header_text = std::str::from_utf8(&response_bytes[..header_end])
+        .context("upstream returned non-UTF8 WebSocket headers")?;
+    let mut lines = header_text.split("\r\n");
+    let status_line = lines.next().context("missing WebSocket status line")?;
+    let status_number = status_line.split_whitespace().nth(1)
+        .context("invalid WebSocket status line")?.parse::<u16>()?;
+    let status = StatusCode::from_u16(status_number)?;
+    if status != StatusCode::SWITCHING_PROTOCOLS {
+        anyhow::bail!("upstream rejected WebSocket upgrade with status {status}");
+    }
+
+    let mut builder = Response::builder().status(status);
+    for line in lines {
+        if line.is_empty() { continue; }
+        if let Some((name, value)) = line.split_once(':') {
+            let name = header::HeaderName::from_bytes(name.trim().as_bytes())?;
+            let value = header::HeaderValue::from_bytes(value.trim().as_bytes())?;
+            builder = builder.header(name, value);
+        }
+    }
+    let response = builder.body(full(Bytes::new()))?;
+    let leftover = response_bytes[header_end..].to_vec();
+
+    tokio::spawn(async move {
+        match on_upgrade.await {
+            Ok(upgraded) => {
+                let mut downstream = TokioIo::new(upgraded);
+                if !leftover.is_empty() {
+                    if downstream.write_all(&leftover).await.is_err() { return; }
+                }
+                if let Err(err) = tokio::io::copy_bidirectional(&mut downstream, &mut upstream).await {
+                    warn!(error = %err, "WebSocket tunnel closed with an error");
+                }
+            }
+            Err(err) => warn!(error = %err, "client WebSocket upgrade failed"),
+        }
+    });
+    Ok(response)
+}
+
+fn find_header_end(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn client_ip(req: &Request<Incoming>, peer: SocketAddr, trusted_proxy_cidrs: &[String]) -> String {
+    forwarded_ip(req.headers(), peer.ip(), trusted_proxy_cidrs)
+}
+
+fn forwarded_ip(headers: &hyper::HeaderMap, peer_ip: IpAddr, trusted_proxy_cidrs: &[String]) -> String {
+    let trusted_peer = trusted_proxy_cidrs.iter()
+        .filter_map(|cidr| cidr.parse::<ipnet::IpNet>().ok())
+        .any(|network| network.contains(&peer_ip));
+
+    // Forwarding headers are client-controlled unless the direct peer is a trusted proxy.
+    if trusted_peer {
+        for name in ["cf-connecting-ip", "x-forwarded-for"] {
+            if let Some(value) = headers.get(name).and_then(|v| v.to_str().ok()) {
+                let first = value.split(',').next().unwrap_or("").trim();
+                if let Ok(ip) = first.parse::<IpAddr>() {
+                    return ip.to_string();
+                }
+            }
+        }
+    }
+    peer_ip.to_string()
+}
+
+fn normalize_host(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.starts_with('[') {
+        return raw.split(']').next().unwrap_or(raw).trim_start_matches('[').to_ascii_lowercase();
+    }
+    raw.rsplit_once(':').map(|(host, _)| host).unwrap_or(raw).to_ascii_lowercase()
+}
+
+fn header_text(headers: &hyper::HeaderMap, name: header::HeaderName) -> String {
+    headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or("unknown").to_string()
+}
+
+fn truncate(value: &str, max: usize) -> &str {
+    let end = value.char_indices().map(|(i, _)| i).filter(|i| *i <= max).last().unwrap_or(0);
+    if value.len() <= max { value } else { &value[..end] }
+}
+
+async fn write_access_log(ip: &str, req: &Request<Incoming>, host: &str, sid: &str) -> Result<()> {
+    fs::create_dir_all("logs").await?;
+    let now = Utc::now();
+    let path = format!("logs/access-{}.log", now.format("%Y-%m-%d"));
+    let url = req.uri().path_and_query().map(|v| v.as_str()).unwrap_or("/");
+    let line = format!(
+        "[{}] [SESSION: {}] IP: {} | METHOD: {} | URL: {}{}\n",
+        now.format("%Y-%m-%d %H:%M:%S"), sid, ip, req.method(), host, url
+    );
+    let mut file = OpenOptions::new().create(true).append(true).open(path).await?;
+    file.write_all(line.as_bytes()).await?;
+    Ok(())
+}
+
+fn error_response(status: StatusCode, code: u16, fallback: &str, use_static: bool) -> Response<ProxyBody> {
+    let page = if use_static {
+        std::fs::read_to_string(format!("staticPages/{code}.html")).unwrap_or_else(|_| fallback.to_string())
+    } else {
+        fallback.to_string()
+    };
+    let content_type = if use_static { "text/html; charset=utf-8" } else { "text/plain; charset=utf-8" };
+    Response::builder().status(status).header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(full(page)).unwrap()
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_port_from_hostname() {
+        assert_eq!(normalize_host("example.com:8080"), "example.com");
+    }
+
+    #[test]
+    fn blocks_common_waf_payloads() {
+        assert!(waf_blocked("/../../etc/passwd"));
+        assert!(waf_blocked("/search?q=union select password"));
+        assert!(waf_blocked("/%3cscript%3e".replace("%3c", "<").replace("%3e", ">").as_str()));
+        assert!(!waf_blocked("/api/users?id=123"));
+    }
+
+    #[test]
+    fn handles_bracketed_ipv6_host() {
+        assert_eq!(normalize_host("[::1]:8080"), "::1");
+    }
+
+    #[test]
+    fn truncates_only_at_utf8_boundaries() {
+        let input = "a".repeat(254) + "ğ";
+        assert_eq!(truncate(&input, 255).len(), 254);
+    }
+
+    #[test]
+    fn finds_end_of_http_headers() {
+        assert_eq!(find_header_end(b"HTTP/1.1 101 Switching Protocols\r\n\r\nframe"), Some(32));
+    }
+
+    #[test]
+    fn ignores_forwarded_ip_from_untrusted_peer() {
+        let request = Request::builder()
+            .header("x-forwarded-for", "198.51.100.10")
+            .body(())
+            .unwrap();
+        let peer: IpAddr = "192.0.2.20".parse().unwrap();
+        assert_eq!(forwarded_ip(request.headers(), peer, &[]), "192.0.2.20");
+    }
+
+    #[test]
+    fn accepts_forwarded_ip_from_trusted_peer() {
+        let request = Request::builder()
+            .header("cf-connecting-ip", "198.51.100.10")
+            .body(())
+            .unwrap();
+        let peer: IpAddr = "192.0.2.20".parse().unwrap();
+        let trusted = vec!["192.0.2.0/24".to_string()];
+        assert_eq!(forwarded_ip(request.headers(), peer, &trusted), "198.51.100.10");
+    }
+
+}
