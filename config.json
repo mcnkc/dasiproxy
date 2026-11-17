@@ -25,5 +25,6 @@
     "cfZoneId": "",
     "listenAddress": "0.0.0.0",
     "listenPort": 80,
-    "trustedProxyCidrs": []
+    "trustedProxyCidrs": [],
+    "requireCloudflare": true
 }
