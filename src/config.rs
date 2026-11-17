@@ -28,6 +28,7 @@ pub struct Config {
     pub cf_zone_id: String,
     pub listen_address: String,
     pub listen_port: u16,
+    pub trusted_proxy_cidrs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +68,7 @@ impl Default for Config {
             cf_zone_id: String::new(),
             listen_address: "0.0.0.0".into(),
             listen_port: 80,
+            trusted_proxy_cidrs: Vec::new(),
         }
     }
 }
@@ -141,6 +143,16 @@ pub fn set_value(key: &str, value: &str) -> Result<()> {
         "cfApiToken" => cfg.cf_api_token = value.trim().to_string(),
         "cfZoneId" => cfg.cf_zone_id = value.trim().to_string(),
         "serverPublicIp" => cfg.server_public_ip = value.trim().to_string(),
+        "trustedProxyCidrs" => {
+            cfg.trusted_proxy_cidrs = value.split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect();
+            for cidr in &cfg.trusted_proxy_cidrs {
+                cidr.parse::<ipnet::IpNet>().with_context(|| format!("Geçersiz trusted proxy CIDR: {cidr}"))?;
+            }
+        },
         "rateLimit.limit" => cfg.rate_limit.limit = value.parse().context("rateLimit.limit sayı olmalı")?,
         "rateLimit.window" => cfg.rate_limit.window = value.parse().context("rateLimit.window sayı olmalı")?,
         "priorityEvaluateIntervalDays" => cfg.priority_evaluate_interval_days = value.parse().context("priorityEvaluateIntervalDays sayı olmalı")?,
