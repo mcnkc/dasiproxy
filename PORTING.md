@@ -21,20 +21,20 @@ known-good Node.js v2 version while this branch is developed.
 | Daily access logs | ✅ Initial port | `logs/access-YYYY-MM-DD.log` |
 | Static error pages | ✅ Initial port | Existing `staticPages/*.html` preserved |
 | Runtime logs | ✅ Initial port | Daily rotating tracing output |
-| Cloudflare DNS records | 🟡 Partial | TUI creates proxied A records for new vhosts; delete/update and full lifecycle handling pending |
+| Cloudflare DNS records | 🟡 Partial | Creates proxied A records and deletes only records tagged as dasiiProxy-managed; update/rollback and full lifecycle handling pending |
 | Discord alerts | ✅ Initial port | Upstream and WebSocket failures trigger a per-domain webhook alert with a five-minute cooldown |
 | Public IP auto-detection | ✅ Initial port | Looks up the public IP during startup and stores it in config; network failure is non-fatal |
 | Dashboard login/password | 🔁 Replaced | No network dashboard; local TUI is the control surface |
-| Dashboard REST API | 🔁 Replaced | CLI commands and TUI actions instead |
+| Dashboard REST API | 🔁 Replaced | CLI commands and TUI actions instead |\n| Runtime overview metrics | ✅ Initial port | Uptime, request totals, in-flight requests, average response time and AI crawler block count |\n| System resource metrics | ⏳ Pending | CPU and RAM statistics from the old status API are not yet shown |\n| Dashboard configuration controls | ✅ Initial port | TUI toggles core security/logging/priority options and edits Cloudflare, Discord and dpSession settings; CLI config-set also exists |\n| Trusted proxy headers | ✅ Hardened | Forwarded client IP headers are only read when the direct peer matches configured trustedProxyCidrs |
 | TLS termination | ⏳ Pending / deployment-specific | Current design expects Cloudflare or another TLS edge to forward HTTP |
-| Linux / Windows installer | ✅ Initial port | Cargo-based installers; Rust toolchain required |
+| Linux / Windows installer | ✅ Initial port | Cargo-based installers; Rust toolchain required; CI checks both OSes |
 
 ## Test gates before production
 
 - Build and unit tests on Linux and Windows
 - HTTP method, body streaming, headers, redirects, and error-page tests\n- Priority evaluation timing and ranking tests
 - WebSocket handshake and long-lived bidirectional traffic test
-- Rate-limit / auto-ban / allowlist integration tests
+- Rate-limit / auto-ban / allowlist integration tests\n- Trusted-proxy CIDR tests and Cloudflare client-IP configuration review
 - Cloudflare DNS, Discord webhook, and dpSession API integration tests
 - Load test and memory profiling
 - Run in parallel with v2 before switching DNS or service ports
