@@ -70,3 +70,24 @@ fn write_json<T: Serialize>(name: &str, value: &T) -> Result<()> {
     fs::rename(tmp, name).with_context(|| format!("{name} güncellenemedi"))?;
     Ok(())
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_ipv4_address() {
+        assert_eq!(normalize_ip("203.0.113.7").unwrap(), "203.0.113.7");
+    }
+
+    #[test]
+    fn normalizes_ipv6_address() {
+        assert_eq!(normalize_ip("2001:db8::1").unwrap(), "2001:db8::1");
+    }
+
+    #[test]
+    fn rejects_invalid_ip() {
+        assert!(normalize_ip("not-an-ip").is_err());
+    }
+}
