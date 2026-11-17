@@ -24,6 +24,7 @@ async fn main() -> Result<()> {
         Command::Tui => tui::run().await,
         Command::Serve => proxy::serve().await,
         Command::Config { show } => config::print_config(show),
+        Command::ConfigSet { key, value } => config::set_value(&key, &value),
         Command::Vhosts => app::list_vhosts(),
         Command::Sessions => app::list_sessions(),
         Command::Traffic => app::show_traffic(),
