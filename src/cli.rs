@@ -20,10 +20,25 @@ pub enum Command {
     ConfigSet { key: String, value: String },
     /// List configured virtual hosts
     Vhosts,
+    /// Add a virtual host and optionally create its managed Cloudflare DNS record
+    VhostAdd { domain: String, port: u16 },
+    /// Remove a virtual host and its managed Cloudflare DNS record
+    VhostRemove { domain: String },
     /// Show runtime status and counters
     Status,
-    /// List tracked dpSessions
-    Sessions,
+    /// List tracked dpSessions with search and pagination
+    Sessions {
+        #[arg(long)]
+        search: Option<String>,
+        #[arg(long, default_value_t = 1)]
+        page: usize,
+        #[arg(long, default_value_t = 50)]
+        per_page: usize,
+    },
+    /// Ban all IPs associated with a tracked session UUID
+    SessionBan { session_id: String },
+    /// Unban all IPs associated with a tracked session UUID
+    SessionUnban { session_id: String },
     /// Display traffic counters and priority hosts
     Traffic,
     /// Show today's access log entries
