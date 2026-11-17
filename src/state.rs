@@ -1,0 +1,68 @@
+use anyhow::{Context, Result};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::{collections::{HashMap, HashSet}, fs, net::IpAddr, path::Path};
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct State {
+    pub vhosts: HashMap<String, String>,
+    pub blacklist: HashSet<String>,
+    pub whitelist: HashSet<String>,
+    pub visit_stats: HashMap<String, u64>,
+    pub priority_sites: HashSet<String>,
+    pub sessions: HashMap<String, String>,
+}
+
+impl State {
+    pub fn load() -> Result<Self> {
+        let mut state = Self::default();
+        state.vhosts = read_json("vhosts.json")?;
+        state.blacklist = read_json("blacklist.json")?;
+        state.whitelist = crate::config::load()?.ip_whitelist.into_iter().collect();
+        state.visit_stats = read_json("visit_stats.json")?;
+        state.priority_sites = read_json("priority_sites.json")?;
+        state.sessions = read_json("dpsessions.json")?;
+        Ok(state)
+    }
+
+    pub fn save(&self) -> Result<()> {
+        write_json("vhosts.json", &self.vhosts)?;
+        write_json("blacklist.json", &self.blacklist)?;
+        write_json("visit_stats.json", &self.visit_stats)?;
+        write_json("priority_sites.json", &self.priority_sites)?;
+        write_json("dpsessions.json", &self.sessions)?;
+        Ok(())
+    }
+
+    pub fn block(&mut self, raw: &str, enabled: bool) -> Result<()> {
+        let ip = normalize_ip(raw)?;
+        if enabled { self.blacklist.insert(ip); } else { self.blacklist.remove(&ip); }
+        write_json("blacklist.json", &self.blacklist)
+    }
+
+    pub fn whitelist(&mut self, raw: &str, enabled: bool) -> Result<()> {
+        let ip = normalize_ip(raw)?;
+        if enabled { self.whitelist.insert(ip); } else { self.whitelist.remove(&ip); }
+        let mut cfg = crate::config::load()?;
+        cfg.ip_whitelist = self.whitelist.iter().cloned().collect();
+        crate::config::save(&cfg)
+    }
+}
+
+pub fn normalize_ip(raw: &str) -> Result<String> {
+    let first = raw.trim().split(',').next().unwrap_or("").trim();
+    let ip: IpAddr = first.parse().context("Geçersiz IP adresi")?;
+    Ok(ip.to_string())
+}
+
+fn read_json<T: DeserializeOwned + Default>(name: &str) -> Result<T> {
+    if !Path::new(name).exists() { return Ok(T::default()); }
+    let raw = fs::read_to_string(name).with_context(|| format!("{name} okunamadı"))?;
+    serde_json::from_str(&raw).with_context(|| format!("{name} geçersiz JSON"))
+}
+
+fn write_json<T: Serialize>(name: &str, value: &T) -> Result<()> {
+    let tmp = format!("{name}.tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(value)?)?;
+    fs::rename(tmp, name).with_context(|| format!("{name} güncellenemedi"))?;
+    Ok(())
+}
