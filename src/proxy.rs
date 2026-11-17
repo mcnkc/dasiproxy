@@ -607,4 +607,26 @@ mod tests {
     fn finds_end_of_http_headers() {
         assert_eq!(find_header_end(b"HTTP/1.1 101 Switching Protocols\r\n\r\nframe"), Some(32));
     }
+
+    #[test]
+    fn ignores_forwarded_ip_from_untrusted_peer() {
+        let request = Request::builder()
+            .header("x-forwarded-for", "198.51.100.10")
+            .body(())
+            .unwrap();
+        let peer: IpAddr = "192.0.2.20".parse().unwrap();
+        assert_eq!(forwarded_ip(request.headers(), peer, &[]), "192.0.2.20");
+    }
+
+    #[test]
+    fn accepts_forwarded_ip_from_trusted_peer() {
+        let request = Request::builder()
+            .header("cf-connecting-ip", "198.51.100.10")
+            .body(())
+            .unwrap();
+        let peer: IpAddr = "192.0.2.20".parse().unwrap();
+        let trusted = vec!["192.0.2.0/24".to_string()];
+        assert_eq!(forwarded_ip(request.headers(), peer, &trusted), "198.51.100.10");
+    }
+
 }
