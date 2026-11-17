@@ -30,6 +30,9 @@ cargo run -- vhosts
 cargo run -- sessions
 cargo run -- traffic
 cargo run -- logs --lines 80
+cargo run -- logs --system --lines 80
+cargo run -- config-set maintenanceMode true
+cargo run -- config-set trustedProxyCidrs "127.0.0.1/32,10.0.0.0/8"
 cargo run -- ban 203.0.113.10
 cargo run -- unban 203.0.113.10
 cargo run -- whitelist-add 203.0.113.10
@@ -41,6 +44,12 @@ cargo run -- config --show
 Running the proxy on port 80 generally requires elevated privileges or a Linux
 capability such as `CAP_NET_BIND_SERVICE`. Set `listenPort` in `config.json`
 to an unprivileged port while testing.
+
+Forwarding headers such as `CF-Connecting-IP` and `X-Forwarded-For` are only
+trusted when the direct TCP peer matches a CIDR in `trustedProxyCidrs`. Keep
+this list empty when clients connect directly. When Cloudflare or another edge
+proxy is in front, configure only that provider's current published proxy ranges;
+do not trust arbitrary `X-Forwarded-For` values.
 
 ## Data compatibility
 
