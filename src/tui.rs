@@ -20,7 +20,6 @@ use std::{
     time::Duration,
 };
 use tokio::task::JoinHandle;
-use uuid::Uuid;
 
 const ITEMS: [&str; 27] = [
     "Overview",
@@ -50,6 +49,7 @@ const ITEMS: [&str; 27] = [
     "Unban IP",
     "Add IP to Whitelist",
     "Remove IP from Whitelist",
+    "Quit",
 ];
 
 pub async fn run() -> Result<()> {
@@ -208,7 +208,7 @@ async fn draw_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Res
                             detail = panel_detail(9)?;
                         }
                         17 => {
-                            if let Some(webhook) = prompt("Discord webhook URL (empty clears it): ")? {
+                            if let Some(webhook) = prompt_any("Discord webhook URL (empty clears it): ")? {
                                 let mut cfg = crate::config::load()?;
                                 cfg.discord_webhook = webhook.trim().to_string();
                                 crate::config::save(&cfg)?;
@@ -240,7 +240,7 @@ async fn draw_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Res
                         19 => {
                             let token = prompt("Cloudflare API token: ")?;
                             let zone = prompt("Cloudflare Zone ID: ")?;
-                            let public_ip = prompt("Public IP (empty = auto-detect): ")?;
+                            let public_ip = prompt_any("Public IP (empty = auto-detect): ")?;
                             if let (Some(token), Some(zone), Some(public_ip)) = (token, zone, public_ip) {
                                 if token.trim().is_empty() || zone.trim().is_empty() {
                                     notice = "Cloudflare token and Zone ID are required".into();
@@ -339,6 +339,7 @@ async fn draw_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Res
                                 }
                             }
                         }
+                        27 => break,
                         _ => {}
                     },
                     _ => {}
