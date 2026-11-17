@@ -230,15 +230,15 @@ async fn websocket_proxy(mut req: Request<Incoming>, target: &str) -> Result<Res
         .context("could not connect to WebSocket upstream")?;
 
     let path = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
-    let mut head = format!("{} {} HTTP/1.1\\r\\n", req.method(), path);
+    let mut head = format!("{} {} HTTP/1.1\r\n", req.method(), path);
     for (name, value) in req.headers() {
         let value = value.to_str().context("invalid request header encoding")?;
         head.push_str(name.as_str());
         head.push_str(": ");
         head.push_str(value);
-        head.push_str("\\r\\n");
+        head.push_str("\r\n");
     }
-    head.push_str("\\r\\n");
+    head.push_str("\r\n");
     upstream.write_all(head.as_bytes()).await.context("could not forward WebSocket handshake")?;
 
     let mut response_bytes = Vec::with_capacity(4096);
@@ -255,7 +255,7 @@ async fn websocket_proxy(mut req: Request<Incoming>, target: &str) -> Result<Res
 
     let header_text = std::str::from_utf8(&response_bytes[..header_end])
         .context("upstream returned non-UTF8 WebSocket headers")?;
-    let mut lines = header_text.split("\\r\\n");
+    let mut lines = header_text.split("\r\n");
     let status_line = lines.next().context("missing WebSocket status line")?;
     let status_number = status_line.split_whitespace().nth(1)
         .context("invalid WebSocket status line")?.parse::<u16>()?;
@@ -294,7 +294,7 @@ async fn websocket_proxy(mut req: Request<Incoming>, target: &str) -> Result<Res
 }
 
 fn find_header_end(bytes: &[u8]) -> Option<usize> {
-    bytes.windows(4).position(|window| window == b"\\r\\n\\r\\n")
+    bytes.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
 fn client_ip(req: &Request<Incoming>, peer: SocketAddr) -> String {
@@ -368,6 +368,11 @@ mod tests {
     #[test]
     fn truncates_only_at_utf8_boundaries() {
         let input = "a".repeat(254) + "ğ";
-        assert!(truncate(&input, 255).is_char_boundary(truncate(&input, 255).len()));
+        assert_eq!(truncate(&input, 255).len(), 254);
+    }
+
+    #[test]
+    fn finds_end_of_http_headers() {
+        assert_eq!(find_header_end(b"HTTP/1.1 101 Switching Protocols\\r\\n\\r\\nframe"), Some(34));
     }
 }
