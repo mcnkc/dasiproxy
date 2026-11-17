@@ -18,7 +18,7 @@ use tokio::{
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::{config, state::State};
+use crate::{config, state::{State, normalize_ip}};
 
 type ProxyBody = BoxBody<Bytes, hyper::Error>;
 
@@ -27,7 +27,16 @@ fn full(value: impl Into<Bytes>) -> ProxyBody {
 }
 
 pub async fn serve() -> Result<()> {
-    let cfg = config::load()?;
+    let mut cfg = config::load()?;
+    if cfg.server_public_ip.trim().is_empty() {
+        match crate::integrations::discover_public_ip().await {
+            Ok(ip) => {
+                cfg.server_public_ip = ip;
+                config::save(&cfg)?;
+            }
+            Err(err) => warn!(error = %err, "could not auto-detect public IP"),
+        }
+    }
     let state = Arc::new(tokio::sync::RwLock::new(State::load()?));
     let rate_state = Arc::new(tokio::sync::Mutex::new(HashMap::<String, (Instant, u64)>::new()));
     let traffic_window = Arc::new(tokio::sync::Mutex::new((Instant::now(), 0u64)));
@@ -103,6 +112,14 @@ async fn handle(
     };
 
     let state_snapshot = state.read().await.clone();
+
+    if cfg.enable_dp_session_api
+        && host.eq_ignore_ascii_case(&cfg.dp_session_api_domain)
+        && req.uri().path().starts_with("/dpsession/api/")
+    {
+        return Ok(handle_dp_session_api(&req, &state, &cfg).await);
+    }
+
     let whitelisted = state_snapshot.whitelist.contains(&ip);
 
     if state_snapshot.blacklist.contains(&ip) && !whitelisted {
@@ -244,6 +261,14 @@ async fn handle(
             Ok(response) => Ok(response),
             Err(err) => {
                 error!(domain = %host, error = %err, "websocket upstream failed");
+                let alert_cfg = cfg.clone();
+                let alert_domain = host.clone();
+                let alert_error = err.to_string();
+                tokio::spawn(async move {
+                    if let Err(alert_err) = crate::integrations::notify_proxy_error(&alert_cfg, &alert_domain, &alert_error).await {
+                        warn!(error = %alert_err, "Discord error alert failed");
+                    }
+                });
                 Ok(error_response(StatusCode::BAD_GATEWAY, 502, "WebSocket Bad Gateway", cfg.prefer_default_static_pages))
             }
         };
@@ -268,12 +293,102 @@ async fn handle(
         }
         Err(err) => {
             error!(domain = %host, error = %err, "upstream request failed");
+            let alert_cfg = cfg.clone();
+            let alert_domain = host.clone();
+            let alert_error = err.to_string();
+            tokio::spawn(async move {
+                if let Err(alert_err) = crate::integrations::notify_proxy_error(&alert_cfg, &alert_domain, &alert_error).await {
+                    warn!(error = %alert_err, "Discord error alert failed");
+                }
+            });
             Ok(error_response(StatusCode::BAD_GATEWAY, 502, "Bad Gateway", cfg.prefer_default_static_pages))
         }
     }
 }
 
 
+
+
+
+async fn handle_dp_session_api(
+    req: &Request<Incoming>,
+    state: &Arc<tokio::sync::RwLock<State>>,
+    cfg: &config::Config,
+) -> Response<ProxyBody> {
+    let query = req.uri().query().unwrap_or("");
+    let params = url::form_urlencoded::parse(query.as_bytes());
+    let mut auth = None;
+    let mut ban = None;
+    let mut unban = None;
+    for (key, value) in params {
+        match key.as_ref() {
+            "auth" => auth = Some(value.into_owned()),
+            "ban" => ban = Some(value.into_owned()),
+            "unban" => unban = Some(value.into_owned()),
+            _ => {}
+        }
+    }
+
+    if auth.as_deref() != Some(cfg.dp_session_api_key.as_str()) {
+        return api_text_response(StatusCode::FORBIDDEN, "Geçersiz Yetki Kodu (Auth Mismatch)".into());
+    }
+
+    if let Some(session_id) = ban {
+        let mut guard = state.write().await;
+        let matching_ips: Vec<String> = guard.sessions.iter()
+            .filter_map(|(fingerprint, sid)| {
+                if sid == &session_id {
+                    Some(fingerprint.split('|').next().unwrap_or("").to_string())
+                } else { None }
+            })
+            .collect();
+        let mut banned = Vec::new();
+        for raw_ip in matching_ips {
+            if let Ok(ip) = normalize_ip(&raw_ip) {
+                if guard.blacklist.insert(ip.clone()) { banned.push(ip); }
+            }
+        }
+        if let Err(err) = guard.save_blacklist() {
+            warn!(error = %err, "dpSession API could not persist blacklist");
+            return api_text_response(StatusCode::INTERNAL_SERVER_ERROR, "Kara liste kaydedilemedi".into());
+        }
+        let detail = if banned.is_empty() { "Eşleşen IP bulunamadı".into() } else { banned.join(", ") };
+        return api_text_response(StatusCode::OK, format!("Session [ {session_id} ] BANLANDI. Yasaklanan IP'ler: {detail}"));
+    }
+
+    if let Some(session_id) = unban {
+        let mut guard = state.write().await;
+        let matching_ips: Vec<String> = guard.sessions.iter()
+            .filter_map(|(fingerprint, sid)| {
+                if sid == &session_id {
+                    Some(fingerprint.split('|').next().unwrap_or("").to_string())
+                } else { None }
+            })
+            .collect();
+        let mut unbanned = Vec::new();
+        for raw_ip in matching_ips {
+            if let Ok(ip) = normalize_ip(&raw_ip) {
+                if guard.blacklist.remove(&ip) { unbanned.push(ip); }
+            }
+        }
+        if let Err(err) = guard.save_blacklist() {
+            warn!(error = %err, "dpSession API could not persist blacklist");
+            return api_text_response(StatusCode::INTERNAL_SERVER_ERROR, "Kara liste kaydedilemedi".into());
+        }
+        let detail = if unbanned.is_empty() { "Eşleşen IP bulunamadı".into() } else { unbanned.join(", ") };
+        return api_text_response(StatusCode::OK, format!("Session [ {session_id} ] BAN KALDIRILDI. İzin açılan IP'ler: {detail}"));
+    }
+
+    api_text_response(StatusCode::BAD_REQUEST, "Geçersiz İstek (Parametre Eksik)".into())
+}
+
+fn api_text_response(status: StatusCode, body: String) -> Response<ProxyBody> {
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(full(body))
+        .unwrap()
+}
 
 fn is_websocket_upgrade(req: &Request<Incoming>) -> bool {
     let upgrade = req.headers().get(header::UPGRADE).and_then(|v| v.to_str().ok()).unwrap_or("");
